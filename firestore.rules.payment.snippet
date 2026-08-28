@@ -1,0 +1,77 @@
+// Recommended Firestore rules for Razorpay payment integrity.
+// Merge carefully into the Admin project's firestore.rules — do not
+// deploy from the customer app without Admin coordination.
+//
+// Goal: clients can create pending orders, but ONLY Cloud Functions
+// (Admin SDK) may write payment verification fields.
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(customerId) {
+      return isSignedIn() && request.auth.uid == customerId;
+    }
+
+    function paymentTruthUnchanged() {
+      return !request.resource.data.diff(resource.data).affectedKeys()
+        .hasAny([
+          'paymentStatus',
+          'paymentVerified',
+          'razorpayPaymentId',
+          'razorpayOrderId',
+          'paidAmount',
+          'paidAmountPaise',
+          'payableAmountPaise',
+          'paymentVerifiedAt',
+          'paymentSource',
+          'refundId',
+          'refundStatus',
+          'paymentFailureReason'
+        ]);
+    }
+
+    function paymentTruthAbsentOnCreate() {
+      return !request.resource.data.keys().hasAny([
+        'paymentStatus',
+        'paymentVerified',
+        'razorpayPaymentId',
+        'razorpayOrderId',
+        'paidAmount',
+        'paidAmountPaise',
+        'paymentVerifiedAt',
+        'paymentSource'
+      ]);
+    }
+
+    match /orders/{orderId} {
+      allow read: if isSignedIn()
+        && (resource.data.customerId == request.auth.uid
+            || get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin');
+
+      allow create: if isSignedIn()
+        && request.resource.data.customerId == request.auth.uid
+        && paymentTruthAbsentOnCreate();
+
+      allow update: if isSignedIn()
+        && resource.data.customerId == request.auth.uid
+        && paymentTruthUnchanged()
+        && request.resource.data.customerId == resource.data.customerId;
+
+      // Admin SDK / Cloud Functions bypass these rules.
+      allow delete: if false;
+    }
+
+    match /paymentEvents/{id} {
+      allow read, write: if false; // Admin SDK only
+    }
+
+    match /webhookEvents/{id} {
+      allow read, write: if false; // Admin SDK only
+    }
+  }
+}

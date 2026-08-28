@@ -1,0 +1,39 @@
+{
+  "project_info": {
+    "project_number": "1045450942825",
+    "project_id": "tastykart-b791a",
+    "storage_bucket": "tastykart-b791a.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1045450942825:android:dc2b9848c2dc67aa66f5f8",
+        "android_client_info": {
+          "package_name": "com.arrowcoders.fooapp"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "1045450942825-m4p8st8036bp47gvst884irvni5799sg.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDeiMUfqmGaBNiAFg5itjlyefmpEnzWWws"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "1045450942825-m4p8st8036bp47gvst884irvni5799sg.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
