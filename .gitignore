@@ -43,7 +43,7 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
-android/local.properties
+
 android/.kotlin/
 
 # Secrets / env (never commit)
@@ -59,3 +59,12 @@ serviceAccount*.json
 functions/node_modules/
 functions/lib/
 functions/.runtimeconfig.json
+
+# Android keystores — NEVER commit signing keys
+*.jks
+*.keystore
+android/key.properties
+android/app/key.properties
+
+# Android local SDK paths
+android/local.properties

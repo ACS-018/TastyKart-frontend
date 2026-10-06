@@ -6,24 +6,41 @@ import '../../category/category_screen.dart';
 
 /// Home Explore — Admin `restaurantCategories` (cuisine types).
 class ExploreCategories extends StatelessWidget {
-  const ExploreCategories({super.key});
+  const ExploreCategories({
+    super.key,
+    this.showTitle = true,
+    this.onPrimary = false,
+  });
+
+  final bool showTitle;
+  final bool onPrimary;
 
   @override
   Widget build(BuildContext context) {
+    final textColor = onPrimary ? AppColors.white : const Color(0xFF1A1A1A);
+    final chipBg = onPrimary
+        ? AppColors.white.withValues(alpha: 0.15)
+        : const Color(0xFFF5F5F5);
+    final shadowColor = onPrimary
+        ? Colors.black.withValues(alpha: 0.0)
+        : Colors.black.withValues(alpha: 0.1);
+
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 20, 16, 8),
+      padding: EdgeInsets.fromLTRB(16, showTitle ? 20 : 10, 16, 8),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            'Explore',
-            style: TextStyle(
-              fontSize: 20,
-              fontWeight: FontWeight.w800,
-              color: Color(0xFF1A1A1A),
+          if (showTitle) ...[
+            Text(
+              'Explore',
+              style: TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.w800,
+                color: textColor,
+              ),
             ),
-          ),
-          const SizedBox(height: 14),
+            const SizedBox(height: 14),
+          ],
           SizedBox(
             height: 96,
             child: StreamBuilder(
@@ -36,17 +53,40 @@ class ExploreCategories extends StatelessWidget {
 
                 if (cats.isEmpty &&
                     snapshot.connectionState == ConnectionState.waiting) {
-                  return const Center(child: CircularProgressIndicator());
+                  return Center(
+                    child: CircularProgressIndicator(
+                      color: onPrimary ? AppColors.white : AppColors.primary,
+                    ),
+                  );
                 }
 
                 if (cats.isEmpty) {
-                  // Soft fallback while Admin seeds restaurantCategories
                   cats = const [
-                    RestaurantCategory(id: '1', name: 'Biryani', status: 'active'),
-                    RestaurantCategory(id: '2', name: 'Chinese', status: 'active'),
-                    RestaurantCategory(id: '3', name: 'South Indian', status: 'active'),
-                    RestaurantCategory(id: '4', name: 'Pizza', status: 'active'),
-                    RestaurantCategory(id: '5', name: 'Burgers', status: 'active'),
+                    RestaurantCategory(
+                      id: '1',
+                      name: 'Biryani',
+                      status: 'active',
+                    ),
+                    RestaurantCategory(
+                      id: '2',
+                      name: 'Chinese',
+                      status: 'active',
+                    ),
+                    RestaurantCategory(
+                      id: '3',
+                      name: 'South Indian',
+                      status: 'active',
+                    ),
+                    RestaurantCategory(
+                      id: '4',
+                      name: 'Pizza',
+                      status: 'active',
+                    ),
+                    RestaurantCategory(
+                      id: '5',
+                      name: 'Burgers',
+                      status: 'active',
+                    ),
                   ];
                 }
 
@@ -54,7 +94,13 @@ class ExploreCategories extends StatelessWidget {
                   scrollDirection: Axis.horizontal,
                   itemCount: cats.length,
                   separatorBuilder: (_, __) => const SizedBox(width: 14),
-                  itemBuilder: (context, i) => _CategoryChip(item: cats[i]),
+                  itemBuilder: (context, i) => _CategoryChip(
+                    item: cats[i],
+                    textColor: textColor,
+                    chipBg: chipBg,
+                    shadowColor: shadowColor,
+                    onPrimary: onPrimary,
+                  ),
                 );
               },
             ),
@@ -66,9 +112,19 @@ class ExploreCategories extends StatelessWidget {
 }
 
 class _CategoryChip extends StatelessWidget {
-  const _CategoryChip({required this.item});
+  const _CategoryChip({
+    required this.item,
+    required this.textColor,
+    required this.chipBg,
+    required this.shadowColor,
+    required this.onPrimary,
+  });
 
   final RestaurantCategory item;
+  final Color textColor;
+  final Color chipBg;
+  final Color shadowColor;
+  final bool onPrimary;
 
   @override
   Widget build(BuildContext context) {
@@ -77,7 +133,8 @@ class _CategoryChip extends StatelessWidget {
         Navigator.push(
           context,
           MaterialPageRoute(
-            builder: (_) => CategoryScreen(categoryName: item.name),
+            builder: (_) =>
+                CategoryScreen(categoryName: item.name, categoryId: item.id),
           ),
         );
       },
@@ -90,10 +147,10 @@ class _CategoryChip extends StatelessWidget {
               height: 64,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: const Color(0xFFF5F5F5),
+                color: chipBg,
                 boxShadow: [
                   BoxShadow(
-                    color: Colors.black.withOpacity(0.1),
+                    color: shadowColor,
                     blurRadius: 8,
                     offset: const Offset(0, 2),
                   ),
@@ -115,10 +172,10 @@ class _CategoryChip extends StatelessWidget {
               textAlign: TextAlign.center,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
+              style: TextStyle(
                 fontSize: 11,
                 fontWeight: FontWeight.w600,
-                color: Color(0xFF1A1A1A),
+                color: textColor,
               ),
             ),
           ],
@@ -131,10 +188,10 @@ class _CategoryChip extends StatelessWidget {
     return Center(
       child: Text(
         item.name.isNotEmpty ? item.name[0].toUpperCase() : '?',
-        style: const TextStyle(
+        style: TextStyle(
           fontSize: 22,
           fontWeight: FontWeight.w800,
-          color: AppColors.primary,
+          color: onPrimary ? AppColors.primary : AppColors.primary,
         ),
       ),
     );

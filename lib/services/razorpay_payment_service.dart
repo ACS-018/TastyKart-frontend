@@ -5,6 +5,8 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:razorpay_flutter/razorpay_flutter.dart';
 
+import '../constants/app_constants.dart';
+
 /// Result of a Checkout + server verification attempt.
 class RazorpayCheckoutResult {
   final bool success;
@@ -36,8 +38,9 @@ class RazorpayPaymentService {
   }
 
   late final Razorpay _razorpay;
-  final FirebaseFunctions _functions =
-      FirebaseFunctions.instanceFor(region: 'asia-south1');
+  final FirebaseFunctions _functions = FirebaseFunctions.instanceFor(
+    region: 'asia-south1',
+  );
 
   Completer<RazorpayCheckoutResult>? _pending;
   String? _firestoreOrderId;
@@ -77,6 +80,9 @@ class RazorpayPaymentService {
     _customerContact = customerContact ?? user.phoneNumber;
     _customerEmail = customerEmail ?? user.email;
     _pending = Completer<RazorpayCheckoutResult>();
+    // Keep a local reference — _complete() nulls _pending, so we must never
+    // call _pending!.future after _complete() has run.
+    final pending = _pending!;
 
     try {
       final create = _functions.httpsCallable('createRazorpayOrder');
@@ -101,14 +107,14 @@ class RazorpayPaymentService {
             reason: 'invalid_create_response',
           ),
         );
-        return _pending!.future;
+        return pending.future;
       }
 
       final options = <String, dynamic>{
         'key': keyId,
         'amount': amount,
         'currency': currency,
-        'name': 'Tasty Kart',
+        'name': AppConstants.appName,
         'description': 'Order $orderId',
         'order_id': razorpayOrderId,
         'prefill': <String, dynamic>{
@@ -127,7 +133,7 @@ class RazorpayPaymentService {
       };
 
       _razorpay.open(options);
-      return _pending!.future;
+      return pending.future;
     } on FirebaseFunctionsException catch (e) {
       _complete(
         RazorpayCheckoutResult(
@@ -136,7 +142,7 @@ class RazorpayPaymentService {
           reason: e.message ?? e.code,
         ),
       );
-      return _pending!.future;
+      return pending.future;
     } catch (e) {
       _complete(
         RazorpayCheckoutResult(
@@ -145,7 +151,7 @@ class RazorpayPaymentService {
           reason: e.toString(),
         ),
       );
-      return _pending!.future;
+      return pending.future;
     }
   }
 

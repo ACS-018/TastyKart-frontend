@@ -134,14 +134,26 @@ class PlatformCharges {
   final int freeDeliveryThreshold;
   final int minOrderValue;
   final double gstRate;
+  final double surgeMultiplier;
+
+  /// Per-km delivery rate — from `deliveryPartner.perKmRate` in settings/admin.
+  final int perKmRate;
+
+  /// Minutes the delivery partner waits at restaurant after the prep timer
+  /// expires before the "Transfer Order" option appears.
+  /// Read from `settings/admin → delivery.partnerWaitMinutes`.
+  final int partnerWaitMinutes;
 
   const PlatformCharges({
-    this.baseDeliveryFee = 40,
+    this.baseDeliveryFee = 20,
     this.maxDeliveryFee = 80,
     this.platformFee = 0,
     this.freeDeliveryThreshold = 299,
     this.minOrderValue = 0,
     this.gstRate = 5,
+    this.surgeMultiplier = 1.0,
+    this.perKmRate = 10,
+    this.partnerWaitMinutes = 10,
   });
 
   factory PlatformCharges.fromSettingsDoc(DocumentSnapshot? doc) {
@@ -149,26 +161,78 @@ class PlatformCharges {
     final root = doc.data() as Map<String, dynamic>? ?? {};
     final charges = root['charges'] as Map<String, dynamic>? ?? {};
     final tax = root['tax'] as Map<String, dynamic>? ?? {};
+    // perKmRate can live under charges (preferred) or legacy deliveryPartner map.
+    final partner = root['deliveryPartner'] as Map<String, dynamic>? ?? {};
+
+    // Safety guard: guardrails against obviously-invalid admin values
+    // (e.g. freeDeliveryThreshold=1 would make every order free).
+    final rawThreshold = (charges['freeDeliveryThreshold'] as num? ?? 299)
+        .toInt();
+    final safeThreshold = rawThreshold < 100 ? 299 : rawThreshold;
+
+    // perKmRate: read deliveryFeePerKm (Admin field name) first.
+    // Use toString + int.tryParse to handle any Firestore type (int, double, String).
+    int parseRate(dynamic v) {
+      if (v == null) return 0;
+      if (v is num) return v.toInt();
+      return int.tryParse(v.toString()) ?? 0;
+    }
+
+    final perKmRate = [
+      parseRate(charges['deliveryFeePerKm']),
+      parseRate(charges['perKmRate']),
+      parseRate(partner['perKmRate']),
+    ].firstWhere((v) => v > 0, orElse: () => 10);
+
     return PlatformCharges(
-      baseDeliveryFee: (charges['baseDeliveryFee'] as num? ?? 40).toInt(),
-      maxDeliveryFee: (charges['maxDeliveryFee'] as num? ?? 80).toInt(),
-      platformFee: (charges['platformFee'] as num? ?? 0).toInt(),
-      freeDeliveryThreshold:
-          (charges['freeDeliveryThreshold'] as num? ?? 299).toInt(),
-      minOrderValue: (charges['minOrderValue'] as num? ?? 0).toInt(),
-      gstRate: (tax['gstRate'] as num? ?? 5).toDouble(),
+      baseDeliveryFee: parseRate(charges['baseDeliveryFee']) > 0
+          ? parseRate(charges['baseDeliveryFee'])
+          : 20,
+      maxDeliveryFee: parseRate(charges['maxDeliveryFee']) > 0
+          ? parseRate(charges['maxDeliveryFee'])
+          : 80,
+      platformFee: parseRate(charges['platformFee']),
+      freeDeliveryThreshold: safeThreshold,
+      minOrderValue: parseRate(charges['minOrderValue']),
+      gstRate: ((tax['gstRate'] ?? charges['gstRate']) as num? ?? 5).toDouble(),
+      surgeMultiplier: (charges['surgeMultiplier'] as num? ?? 1.0).toDouble(),
+      perKmRate: perKmRate,
+      // Read from delivery.partnerWaitMinutes; default 10 min.
+      partnerWaitMinutes: (() {
+        final delivery = root['delivery'] as Map<String, dynamic>? ?? {};
+        final raw = delivery['partnerWaitMinutes'];
+        if (raw is num) return raw.toInt().clamp(1, 120);
+        return 10;
+      })(),
     );
   }
 
-  int deliveryFeeFor(int itemsTotal) {
+  /// Calculates delivery fee.
+  ///
+  /// Formula:  `baseDeliveryFee + (perKmRate × distKm)` × surgeMultiplier
+  ///   rounded up, clamped to `[0, maxDeliveryFee]`.
+  ///
+  /// When distance is unknown, uses the flat `baseDeliveryFee` and respects
+  /// the free-delivery threshold (guarded to a sane minimum).
+  ///
+  /// Example with defaults (base=20, perKm=10):
+  ///   3 km → 20 + (10×3) = ₹50
+  ///   5 km → 20 + (10×5) = ₹70 (clamped to maxDeliveryFee if exceeded)
+  int deliveryFeeFor(int itemsTotal, {double? distKm}) {
+    // Free delivery threshold always takes priority — regardless of distance.
     if (freeDeliveryThreshold > 0 && itemsTotal >= freeDeliveryThreshold) {
       return 0;
     }
+    if (distKm != null && distKm > 0) {
+      // Formula: baseDeliveryFee + (perKmRate × distKm), no surge applied.
+      final total = baseDeliveryFee + (perKmRate * distKm);
+      return total.ceil().clamp(0, maxDeliveryFee);
+    }
+    // No distance known — flat base fee.
     return baseDeliveryFee.clamp(0, maxDeliveryFee);
   }
 
-  int taxFor(int itemsTotal) =>
-      ((itemsTotal * gstRate) / 100).round();
+  int taxFor(int itemsTotal) => ((itemsTotal * gstRate) / 100).round();
 }
 
 /// Admin-compatible order summary for history UI.
@@ -178,7 +242,9 @@ class TkOrder {
   final String customerId;
   final String customerName;
   final String customerPhone;
+  final String restaurantId;
   final String restaurantName;
+  final String restaurantImage;
   final String status;
   final String paymentMethod;
   final List<Map<String, dynamic>> items;
@@ -189,7 +255,28 @@ class TkOrder {
   final int discount;
   final int total;
   final String address;
+  /// Label of the saved address — e.g. "Home", "Work" (from deliveryAddress.label).
+  final String addressLabel;
   final DateTime? createdAt;
+  final String deliveryOtp;
+  final String deliveryPartnerName;
+  final String deliveryStage;
+  final String deliveryPartnerId;
+  final String deliveryPartnerPhone;
+  final double? destLat;
+  final double? destLng;
+
+  /// Tip the customer added for the delivery partner (Firestore key: `tip`).
+  final int tip;
+
+  /// City-surge component baked into [deliveryFee] at checkout time
+  /// (Firestore key: `surgeFee`). Stored separately so the history UI can
+  /// display it as a distinct line item.
+  final int surgeFee;
+
+  /// Wallet credit applied at checkout (Firestore key: `walletUsed`).
+  /// Positive value = deducted from wallet to reduce the grand total.
+  final int walletUsed;
 
   const TkOrder({
     required this.id,
@@ -197,7 +284,9 @@ class TkOrder {
     required this.customerId,
     required this.customerName,
     required this.customerPhone,
+    this.restaurantId = '',
     required this.restaurantName,
+    this.restaurantImage = '',
     required this.status,
     required this.paymentMethod,
     required this.items,
@@ -208,7 +297,18 @@ class TkOrder {
     required this.discount,
     required this.total,
     required this.address,
+    this.addressLabel = '',
     this.createdAt,
+    this.deliveryOtp = '',
+    this.deliveryPartnerName = '',
+    this.deliveryStage = '',
+    this.deliveryPartnerId = '',
+    this.deliveryPartnerPhone = '',
+    this.destLat,
+    this.destLng,
+    this.tip = 0,
+    this.surgeFee = 0,
+    this.walletUsed = 0,
   });
 
   factory TkOrder.fromDoc(DocumentSnapshot doc) {
@@ -228,7 +328,9 @@ class TkOrder {
       customerId: d['customerId'] as String? ?? '',
       customerName: d['customerName'] as String? ?? '',
       customerPhone: d['customerPhone'] as String? ?? '',
+      restaurantId: d['restaurantId'] as String? ?? '',
       restaurantName: d['restaurantName'] as String? ?? '',
+      restaurantImage: d['restaurantImage'] as String? ?? '',
       status: d['status'] as String? ?? 'pending',
       paymentMethod: d['paymentMethod'] as String? ?? '',
       items: items,
@@ -239,7 +341,22 @@ class TkOrder {
       discount: (d['discount'] as num? ?? 0).toInt(),
       total: (d['total'] as num? ?? 0).toInt(),
       address: d['address'] as String? ?? '',
+      addressLabel: (() {
+        final da = d['deliveryAddress'];
+        if (da is Map) return (da['label'] as String? ?? '').trim();
+        return '';
+      })(),
       createdAt: created,
+      deliveryOtp: d['deliveryOtp'] as String? ?? '',
+      deliveryPartnerName: d['deliveryPartnerName'] as String? ?? '',
+      deliveryStage: d['deliveryStage'] as String? ?? '',
+      deliveryPartnerId: d['deliveryPartnerId'] as String? ?? '',
+      deliveryPartnerPhone: d['deliveryPartnerPhone'] as String? ?? '',
+      destLat: (d['destLat'] as num?)?.toDouble(),
+      destLng: (d['destLng'] as num?)?.toDouble(),
+      tip: ((d['tip']) as num? ?? 0).toInt(),
+      surgeFee: ((d['surgeFee']) as num? ?? 0).toInt(),
+      walletUsed: ((d['walletUsed']) as num? ?? 0).toInt(),
     );
   }
 }

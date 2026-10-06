@@ -20,7 +20,11 @@ class FirestorePaths {
   static const reviews = 'reviews';
   static const notifications = 'notifications';
   static const settings = 'settings';
+  static const surgeRequests = 'surgeRequests';
 
   /// Single platform settings document written by Admin.
   static const settingsAdminDoc = 'admin';
+
+  /// Sub-collection under customers/{uid}/savedCards
+  static const savedCards = 'savedCards';
 }

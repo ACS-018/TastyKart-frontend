@@ -1,12 +1,14 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import '../../constants/color_constants.dart';
-import '../../models/delivery_address.dart';
 import '../../services/address_service.dart';
+import '../../services/geocoding_service.dart';
 import '../../state/cart_controller.dart';
 import '../../widgets/address_map_picker.dart';
 import '../../widgets/address_search_field.dart';
+import '../../widgets/app_screen_header.dart';
 import '../../services/places_service.dart';
 
 class SelectLocationScreen extends StatefulWidget {
@@ -28,6 +30,76 @@ class SelectLocationScreen extends StatefulWidget {
 
 class _SelectLocationScreenState extends State<SelectLocationScreen> {
   String _savedFilter = '';
+  bool _locating = false;
+  // Holds the last resolved address string so we can show it as subtitle.
+  String? _resolvedAddress;
+
+  Future<void> _useCurrentLocation() async {
+    if (_locating) return;
+    setState(() => _locating = true);
+
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      var permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+      if (permission == LocationPermission.denied ||
+          permission == LocationPermission.deniedForever) {
+        if (mounted) {
+          messenger.showSnackBar(
+            const SnackBar(
+              content: Text('Location permission denied'),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+        return;
+      }
+
+      final pos = await Geolocator.getCurrentPosition();
+      final latLng = LatLng(pos.latitude, pos.longitude);
+      final address = await GeocodingService.reverseGeocode(latLng);
+      final fullAddress = address ?? '${pos.latitude}, ${pos.longitude}';
+
+      // Show the resolved address as subtitle immediately.
+      if (mounted) setState(() => _resolvedAddress = fullAddress);
+
+      if (!mounted) return;
+
+      final current = DeliveryAddress(
+        id: 'current_location',
+        label: 'Current Location',
+        fullAddress: fullAddress,
+        lat: pos.latitude,
+        lng: pos.longitude,
+      );
+
+      // Directly select the address — no add-form sheet needed.
+      CartScope.of(context).setAddress(current);
+      if (!widget.manageOnly) {
+        Navigator.pop(context, current);
+        return;
+      }
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text('Using your current location'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } catch (e) {
+      if (mounted) {
+        messenger.showSnackBar(
+          const SnackBar(
+            content: Text('Could not get your location. Try again.'),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _locating = false);
+    }
+  }
 
   Future<void> _openAddForm({DeliveryAddress? existing}) async {
     final saved = await showModalBottomSheet<DeliveryAddress>(
@@ -36,10 +108,20 @@ class _SelectLocationScreenState extends State<SelectLocationScreen> {
       backgroundColor: Colors.transparent,
       builder: (_) => AddAddressSheet(existing: existing),
     );
-    if (saved != null && mounted && !widget.manageOnly) {
-      CartScope.of(context).setAddress(saved);
+    if (saved == null || !mounted) return;
+
+    CartScope.of(context).setAddress(saved);
+    if (!widget.manageOnly) {
       Navigator.pop(context, saved);
+      return;
     }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Saved ${saved.label}'),
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: AppColors.success,
+      ),
+    );
   }
 
   void _openAddFromPlace(PlaceDetails details) {
@@ -71,7 +153,9 @@ class _SelectLocationScreenState extends State<SelectLocationScreen> {
           ),
           Expanded(
             child: uid == null
-                ? const Center(child: Text('Please sign in to manage addresses'))
+                ? const Center(
+                    child: Text('Please sign in to manage addresses'),
+                  )
                 : StreamBuilder<List<DeliveryAddress>>(
                     stream: AddressService.watchForUser(uid),
                     builder: (context, snapshot) {
@@ -85,123 +169,244 @@ class _SelectLocationScreenState extends State<SelectLocationScreen> {
                       final addresses = q.isEmpty
                           ? all
                           : all
-                              .where((a) =>
-                                  a.label.toLowerCase().contains(q) ||
-                                  a.fullAddress.toLowerCase().contains(q))
-                              .toList();
+                                .where(
+                                  (a) =>
+                                      a.label.toLowerCase().contains(q) ||
+                                      a.fullAddress.toLowerCase().contains(q),
+                                )
+                                .toList();
 
-                      return ListView(
-                        padding: const EdgeInsets.fromLTRB(16, 20, 16, 24),
-                        children: [
-                          const Text(
-                            'Select Your Location',
-                            style: TextStyle(
-                              fontSize: 18,
-                              fontWeight: FontWeight.w800,
+                      return SafeArea(
+                        top: false,
+                        bottom: true,
+                        child: Container(
+                          decoration: const BoxDecoration(
+                            color: Color(0xFFF7F7F7),
+                            borderRadius: BorderRadius.vertical(
+                              top: Radius.circular(24),
                             ),
                           ),
-                          const SizedBox(height: 14),
-                          AddressSearchField(
-                            hintText: 'Search area, street, landmark…',
-                            onPlaceSelected: _openAddFromPlace,
-                            onTextSubmitted: (v) =>
-                                setState(() => _savedFilter = v),
-                          ),
-                          const SizedBox(height: 8),
-                          _ArrowTile(
-                            title: 'Add Address',
-                            subtitle: 'Save a new delivery location',
-                            onTap: () => _openAddForm(),
-                          ),
-                          const SizedBox(height: 8),
-                          const _DashedLabel(text: 'Saved Address'),
-                          const SizedBox(height: 8),
-                          if (addresses.isEmpty)
-                            Padding(
-                              padding: const EdgeInsets.symmetric(vertical: 24),
-                              child: Column(
-                                children: [
-                                  const Text(
-                                    'No saved addresses yet',
-                                    style: TextStyle(
-                                      fontWeight: FontWeight.w700,
-                                      color: Color(0xFF6B6B6B),
-                                    ),
-                                  ),
-                                  const SizedBox(height: 8),
-                                  TextButton.icon(
-                                    onPressed: () => _openAddForm(),
-                                    icon: const Icon(Icons.add_location_alt),
-                                    label: const Text('Add your first address'),
-                                    style: TextButton.styleFrom(
-                                      foregroundColor: AppColors.primary,
-                                    ),
-                                  ),
-                                ],
+                          clipBehavior: Clip.antiAlias,
+                          child: ListView(
+                            padding: const EdgeInsets.fromLTRB(16, 20, 16, 24),
+                            children: [
+                              const Text(
+                                'Select Your Location',
+                                style: TextStyle(
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.w800,
+                                ),
                               ),
-                            )
-                          else
-                            ...addresses.map((address) {
-                              return _AddressCard(
-                                address: address,
-                                onTap: () {
-                                  CartScope.of(context).setAddress(address);
-                                  if (!widget.manageOnly) {
-                                    Navigator.pop(context, address);
-                                  } else {
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      SnackBar(
-                                        content: Text(
-                                          'Selected ${address.label}',
+                              const SizedBox(height: 14),
+                              AddressSearchField(
+                                hintText: 'Search area, street, landmark…',
+                                onPlaceSelected: _openAddFromPlace,
+                                onTextSubmitted: (v) =>
+                                    setState(() => _savedFilter = v),
+                              ),
+                              const SizedBox(height: 16),
+                              const Padding(
+                                padding: EdgeInsets.only(left: 2, bottom: 8),
+                                child: Text(
+                                  'Use Current Address',
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w700,
+                                    color: Color(0xFF6B6B6B),
+                                  ),
+                                ),
+                              ),
+                              // ── Use current location ───────────────
+                              Material(
+                                color: AppColors.white,
+                                borderRadius: BorderRadius.circular(12),
+                                child: InkWell(
+                                  borderRadius: BorderRadius.circular(12),
+                                  onTap: _locating ? null : _useCurrentLocation,
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 14,
+                                      vertical: 12,
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        Container(
+                                          width: 36,
+                                          height: 36,
+                                          decoration: BoxDecoration(
+                                            color: AppColors.primary.withValues(
+                                              alpha: 0.1,
+                                            ),
+                                            shape: BoxShape.circle,
+                                          ),
+                                          child: _locating
+                                              ? const Padding(
+                                                  padding: EdgeInsets.all(8),
+                                                  child:
+                                                      CircularProgressIndicator(
+                                                        strokeWidth: 2,
+                                                        color:
+                                                            AppColors.primary,
+                                                      ),
+                                                )
+                                              : const Icon(
+                                                  Icons.my_location_rounded,
+                                                  color: AppColors.primary,
+                                                  size: 20,
+                                                ),
                                         ),
-                                        behavior: SnackBarBehavior.floating,
-                                      ),
-                                    );
-                                  }
-                                },
-                                onSetDefault: address.isDefault
-                                    ? null
-                                    : () async {
-                                        await AddressService.setDefault(
-                                          address.id,
-                                        );
-                                      },
-                                onEdit: () => _openAddForm(existing: address),
-                                onDelete: () async {
-                                  final ok = await showDialog<bool>(
-                                    context: context,
-                                    builder: (ctx) => AlertDialog(
-                                      title: const Text('Delete address?'),
-                                      content: Text(
-                                        'Remove "${address.label}" from your account?',
-                                      ),
-                                      actions: [
-                                        TextButton(
-                                          onPressed: () =>
-                                              Navigator.pop(ctx, false),
-                                          child: const Text('Cancel'),
+                                        const SizedBox(width: 12),
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              const Text(
+                                                'Use Current Location',
+                                                style: TextStyle(
+                                                  fontWeight: FontWeight.w700,
+                                                  fontSize: 14,
+                                                ),
+                                              ),
+                                              Text(
+                                                _resolvedAddress ??
+                                                    'Detect your location automatically',
+                                                style: const TextStyle(
+                                                  fontSize: 12,
+                                                  color: Color(0xFF6B6B6B),
+                                                ),
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                              ),
+                                            ],
+                                          ),
                                         ),
-                                        TextButton(
-                                          onPressed: () =>
-                                              Navigator.pop(ctx, true),
-                                          child: const Text('Delete'),
+                                        const Icon(
+                                          Icons.chevron_right_rounded,
+                                          color: Color(0xFF6B6B6B),
                                         ),
                                       ],
                                     ),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 16),
+                              const Padding(
+                                padding: EdgeInsets.only(left: 2, bottom: 8),
+                                child: Text(
+                                  'Add Or Manage Addresses',
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w700,
+                                    color: Color(0xFF6B6B6B),
+                                  ),
+                                ),
+                              ),
+                              _ArrowTile(
+                                title: 'Add Address',
+                                subtitle: 'Save a new delivery location',
+                                onTap: () => _openAddForm(),
+                              ),
+                              const SizedBox(height: 8),
+                              const _DashedLabel(text: 'Saved Address'),
+                              const SizedBox(height: 8),
+                              if (addresses.isEmpty)
+                                Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 24,
+                                  ),
+                                  child: Column(
+                                    children: [
+                                      const Text(
+                                        'No saved addresses yet',
+                                        style: TextStyle(
+                                          fontWeight: FontWeight.w700,
+                                          color: Color(0xFF6B6B6B),
+                                        ),
+                                      ),
+                                      const SizedBox(height: 8),
+                                      TextButton.icon(
+                                        onPressed: () => _openAddForm(),
+                                        icon: const Icon(
+                                          Icons.add_location_alt,
+                                        ),
+                                        label: const Text(
+                                          'Add your first address',
+                                        ),
+                                        style: TextButton.styleFrom(
+                                          foregroundColor: AppColors.primary,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                )
+                              else
+                                ...addresses.map((address) {
+                                  return _AddressCard(
+                                    address: address,
+                                    onTap: () {
+                                      CartScope.of(context).setAddress(address);
+                                      if (!widget.manageOnly) {
+                                        Navigator.pop(context, address);
+                                      } else {
+                                        ScaffoldMessenger.of(
+                                          context,
+                                        ).showSnackBar(
+                                          SnackBar(
+                                            content: Text(
+                                              'Selected ${address.label}',
+                                            ),
+                                            behavior: SnackBarBehavior.floating,
+                                          ),
+                                        );
+                                      }
+                                    },
+                                    onSetDefault: address.isDefault
+                                        ? null
+                                        : () async {
+                                            await AddressService.setDefault(
+                                              address.id,
+                                            );
+                                          },
+                                    onEdit: () =>
+                                        _openAddForm(existing: address),
+                                    onDelete: () async {
+                                      final ok = await showDialog<bool>(
+                                        context: context,
+                                        builder: (ctx) => AlertDialog(
+                                          title: const Text('Delete address?'),
+                                          content: Text(
+                                            'Remove "${address.label}" from your account?',
+                                          ),
+                                          actions: [
+                                            TextButton(
+                                              onPressed: () =>
+                                                  Navigator.pop(ctx, false),
+                                              child: const Text('Cancel'),
+                                            ),
+                                            TextButton(
+                                              onPressed: () =>
+                                                  Navigator.pop(ctx, true),
+                                              child: const Text('Delete'),
+                                            ),
+                                          ],
+                                        ),
+                                      );
+                                      if (ok == true) {
+                                        await AddressService.deleteAddress(
+                                          address.id,
+                                        );
+                                      }
+                                    },
                                   );
-                                  if (ok == true) {
-                                    await AddressService.deleteAddress(
-                                      address.id,
-                                    );
-                                  }
-                                },
-                              );
-                            }),
-                        ],
-                      );
-                    },
-                  ),
-          ),
+                                }),
+                            ], // ListView.children
+                          ), // ListView
+                        ), // Container
+                      ); // SafeArea (return)
+                    }, // builder
+                  ), // StreamBuilder
+          ), // Expanded
         ],
       ),
     );
@@ -252,6 +457,8 @@ class _AddAddressSheetState extends State<AddAddressSheet> {
 
   void _fillAddressFromPin(String text) {
     if (text.trim().isEmpty) return;
+    // Don't overwrite a pre-filled address when editing an existing one.
+    if (_full.text.trim().isNotEmpty) return;
     setState(() {
       _full.value = TextEditingValue(
         text: text,
@@ -276,27 +483,36 @@ class _AddAddressSheetState extends State<AddAddressSheet> {
     setState(() => _saving = true);
     try {
       final existing = widget.existing;
+      // Only treat as an update when we have a real saved id.
+      // A DeliveryAddress with id='' means it was pre-filled from a place
+      // search (new address, not yet in Firestore) — always use addAddress.
       if (existing != null && existing.id.isNotEmpty) {
         final updated = existing.copyWith(
           label: label,
           fullAddress: full,
-          landmark: _landmark.text.trim(),
-          phone: _phone.text.trim(),
+          landmark: _landmark.text.trim().isEmpty
+              ? null
+              : _landmark.text.trim(),
+          phone: _phone.text.trim().isEmpty ? null : _phone.text.trim(),
           isDefault: _makeDefault,
           lat: _lat,
           lng: _lng,
         );
         await AddressService.updateAddress(updated);
-        if (_makeDefault) {
-          await AddressService.setDefault(existing.id);
+        if (mounted) {
+          Navigator.pop(context, updated.copyWith(isDefault: _makeDefault));
         }
-        if (mounted) Navigator.pop(context, updated.copyWith(isDefault: _makeDefault));
       } else {
+        // New address (blank form or pre-filled from place/GPS search).
+        final landmark = _landmark.text.trim().isEmpty
+            ? null
+            : _landmark.text.trim();
+        final phone = _phone.text.trim().isEmpty ? null : _phone.text.trim();
         final id = await AddressService.addAddress(
           label: label,
           fullAddress: full,
-          landmark: _landmark.text.trim(),
-          phone: _phone.text.trim(),
+          landmark: landmark,
+          phone: phone,
           lat: _lat,
           lng: _lng,
           makeDefault: _makeDefault,
@@ -305,8 +521,8 @@ class _AddAddressSheetState extends State<AddAddressSheet> {
           id: id,
           label: label,
           fullAddress: full,
-          landmark: _landmark.text.trim(),
-          phone: _phone.text.trim(),
+          landmark: landmark,
+          phone: phone,
           lat: _lat,
           lng: _lng,
           isDefault: _makeDefault,
@@ -315,10 +531,16 @@ class _AddAddressSheetState extends State<AddAddressSheet> {
       }
     } catch (e) {
       if (!mounted) return;
+      final message = e.toString().contains('permission-denied')
+          ? 'Permission denied. Please sign in again and try.'
+          : e.toString().contains('Sign in required')
+          ? 'Please sign in to save an address.'
+          : 'Could not save address. Please try again.';
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Could not save address: $e'),
+          content: Text(message),
           behavior: SnackBarBehavior.floating,
+          backgroundColor: AppColors.error,
         ),
       );
     } finally {
@@ -354,7 +576,9 @@ class _AddAddressSheetState extends State<AddAddressSheet> {
               ),
               const SizedBox(height: 16),
               Text(
-                widget.existing == null ? 'Add Address' : 'Edit Address',
+                widget.existing == null || widget.existing!.id.isEmpty
+                    ? 'Add Address'
+                    : 'Edit Address',
                 style: const TextStyle(
                   fontSize: 18,
                   fontWeight: FontWeight.w800,
@@ -369,6 +593,12 @@ class _AddAddressSheetState extends State<AddAddressSheet> {
                   _lng = p.longitude;
                 },
                 onAddressResolved: _fillAddressFromPin,
+                // Resolve on init only when editing an existing saved address
+                // (has a real id). For new addresses — including those
+                // pre-filled from a place search — skip init geocoding so
+                // the user's pre-filled address text isn't overwritten.
+                resolveOnInit:
+                    widget.existing != null && widget.existing!.id.isNotEmpty,
               ),
               const SizedBox(height: 12),
               TextField(
@@ -413,7 +643,7 @@ class _AddAddressSheetState extends State<AddAddressSheet> {
                   style: TextStyle(fontWeight: FontWeight.w600),
                 ),
                 value: _makeDefault,
-                activeColor: AppColors.primary,
+                activeThumbColor: AppColors.primary,
                 onChanged: (v) => setState(() => _makeDefault = v),
               ),
               const SizedBox(height: 8),
@@ -452,11 +682,7 @@ class _AddAddressSheetState extends State<AddAddressSheet> {
 }
 
 class _ArrowTile extends StatelessWidget {
-  const _ArrowTile({
-    required this.title,
-    this.subtitle,
-    required this.onTap,
-  });
+  const _ArrowTile({required this.title, this.subtitle, required this.onTap});
 
   final String title;
   final String? subtitle;
@@ -509,7 +735,7 @@ class _AddressCard extends StatelessWidget {
           borderRadius: BorderRadius.circular(12),
           border: Border.all(
             color: address.isDefault
-                ? AppColors.primary.withOpacity(0.45)
+                ? AppColors.primary.withValues(alpha: 0.45)
                 : const Color(0xFFEEEEEE),
           ),
         ),
@@ -529,10 +755,12 @@ class _AddressCard extends StatelessWidget {
                 ),
                 if (address.isDefault)
                   Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 3,
+                    ),
                     decoration: BoxDecoration(
-                      color: AppColors.primary.withOpacity(0.12),
+                      color: AppColors.primary.withValues(alpha: 0.12),
                       borderRadius: BorderRadius.circular(8),
                     ),
                     child: const Text(
@@ -620,45 +848,6 @@ class _RedHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      padding: EdgeInsets.only(
-        top: MediaQuery.of(context).padding.top + 8,
-        left: 8,
-        right: 16,
-        bottom: 18,
-      ),
-      color: AppColors.primary,
-      child: Row(
-        children: [
-          IconButton(
-            onPressed: onBack,
-            icon: const Icon(
-              Icons.arrow_back_ios_new_rounded,
-              color: AppColors.white,
-              size: 20,
-            ),
-          ),
-          const SizedBox(width: 4),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                title,
-                style: const TextStyle(
-                  color: AppColors.white,
-                  fontSize: 22,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-              Text(
-                subtitle,
-                style: const TextStyle(color: AppColors.white, fontSize: 12),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
+    return AppScreenHeader(title: title, subtitle: subtitle, onBack: onBack);
   }
 }

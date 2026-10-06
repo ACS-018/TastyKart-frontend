@@ -12,7 +12,7 @@ class AuthFooterLink extends StatelessWidget {
 
   final String question;
   final String actionLabel;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
@@ -37,7 +37,9 @@ class AuthFooterLink extends StatelessWidget {
             style: TextStyle(
               fontSize: fontSize,
               fontWeight: FontWeight.w600,
-              color: AppColors.primary,
+              color: onTap == null
+                  ? AppColors.textLight
+                  : AppColors.primary,
             ),
           ),
         ),

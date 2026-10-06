@@ -1,15 +1,24 @@
 import 'package:flutter/material.dart';
 import '../../../constants/color_constants.dart';
+import '../../../models/restaurant.dart';
+import '../../../services/firestore_service.dart';
 
 class CuisineFilterSheet extends StatefulWidget {
-  const CuisineFilterSheet({super.key});
+  const CuisineFilterSheet({super.key, this.initiallySelected = const {}});
 
-  static Future<Set<String>?> show(BuildContext context) {
+  /// Set of **category IDs** (Firestore doc IDs) that are pre-selected.
+  final Set<String> initiallySelected;
+
+  /// Returns a [Set] of selected **category IDs**, or null if dismissed.
+  static Future<Set<String>?> show(
+    BuildContext context, {
+    Set<String> initiallySelected = const {},
+  }) {
     return showModalBottomSheet<Set<String>>(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => const CuisineFilterSheet(),
+      builder: (_) => CuisineFilterSheet(initiallySelected: initiallySelected),
     );
   }
 
@@ -18,27 +27,13 @@ class CuisineFilterSheet extends StatefulWidget {
 }
 
 class _CuisineFilterSheetState extends State<CuisineFilterSheet> {
-  final Set<String> _selected = {};
+  late final Set<String> _selected;
 
-  static const List<String> _cuisines = [
-    'South Indian',
-    'North Indian',
-    'Andhra Special',
-    'Biryani',
-    'Chinese',
-    'Italian',
-    'Continental',
-    'Mexican',
-  ];
-
-  static const List<String> _moreOptions = [
-    'Indian',
-    'Fast Food',
-    'Desserts',
-    'Beverages',
-    'Healthy',
-    'Seafood',
-  ];
+  @override
+  void initState() {
+    super.initState();
+    _selected = Set<String>.from(widget.initiallySelected);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -54,6 +49,7 @@ class _CuisineFilterSheetState extends State<CuisineFilterSheet> {
           ),
           child: Column(
             children: [
+              // ── Handle ──────────────────────────────────────────────────
               const SizedBox(height: 10),
               Container(
                 width: 40,
@@ -63,6 +59,8 @@ class _CuisineFilterSheetState extends State<CuisineFilterSheet> {
                   borderRadius: BorderRadius.circular(2),
                 ),
               ),
+
+              // ── Title row ───────────────────────────────────────────────
               Padding(
                 padding: const EdgeInsets.fromLTRB(20, 16, 12, 8),
                 child: Row(
@@ -84,21 +82,63 @@ class _CuisineFilterSheetState extends State<CuisineFilterSheet> {
                 ),
               ),
               const Divider(height: 1),
+
+              // ── List — streamed from restaurantCategories ────────────────
               Expanded(
-                child: ListView(
-                  controller: scrollController,
-                  padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
-                  children: [
-                    _sectionTitle('Cuisines'),
-                    const SizedBox(height: 8),
-                    ..._cuisines.map(_checkboxTile),
-                    const SizedBox(height: 16),
-                    _sectionTitle('More Options'),
-                    const SizedBox(height: 8),
-                    ..._moreOptions.map(_checkboxTile),
-                  ],
+                child: StreamBuilder(
+                  stream: FirestoreService.activeRestaurantCategories(),
+                  builder: (context, snapshot) {
+                    // Loading
+                    if (snapshot.connectionState == ConnectionState.waiting &&
+                        !snapshot.hasData) {
+                      return const Center(
+                        child: Padding(
+                          padding: EdgeInsets.all(32),
+                          child: CircularProgressIndicator(
+                            color: AppColors.primary,
+                          ),
+                        ),
+                      );
+                    }
+
+                    // Map Firestore docs → category names (active only,
+                    // already filtered by the query).
+                    final cats =
+                        (snapshot.data?.docs ?? [])
+                            .map(RestaurantCategory.fromDoc)
+                            .where((c) => c.name.trim().isNotEmpty)
+                            .toList()
+                          // Respect sortOrder if present, else keep Firestore order.
+                          ..sort((a, b) => a.sortOrder.compareTo(b.sortOrder));
+
+                    if (cats.isEmpty) {
+                      return const Center(
+                        child: Padding(
+                          padding: EdgeInsets.all(32),
+                          child: Text(
+                            'No categories available',
+                            style: TextStyle(color: Color(0xFF999999)),
+                          ),
+                        ),
+                      );
+                    }
+
+                    return ListView(
+                      controller: scrollController,
+                      padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
+                      children: [
+                        _sectionTitle('Cuisines'),
+                        const SizedBox(height: 8),
+                        // Pass the full category so we can key by ID while
+                        // displaying the human-readable name.
+                        ...cats.map((c) => _checkboxTile(c.id, c.name)),
+                      ],
+                    );
+                  },
                 ),
               ),
+
+              // ── Action buttons ──────────────────────────────────────────
               SafeArea(
                 top: false,
                 child: Padding(
@@ -107,9 +147,7 @@ class _CuisineFilterSheetState extends State<CuisineFilterSheet> {
                     children: [
                       Expanded(
                         child: TextButton(
-                          onPressed: () {
-                            setState(() => _selected.clear());
-                          },
+                          onPressed: () => setState(() => _selected.clear()),
                           child: const Text(
                             'Clear Filters',
                             style: TextStyle(
@@ -123,8 +161,10 @@ class _CuisineFilterSheetState extends State<CuisineFilterSheet> {
                       Expanded(
                         flex: 2,
                         child: ElevatedButton(
-                          onPressed: () =>
-                              Navigator.pop(context, Set<String>.from(_selected)),
+                          onPressed: () => Navigator.pop(
+                            context,
+                            Set<String>.from(_selected),
+                          ),
                           style: ElevatedButton.styleFrom(
                             backgroundColor: AppColors.primary,
                             foregroundColor: AppColors.white,
@@ -165,16 +205,16 @@ class _CuisineFilterSheetState extends State<CuisineFilterSheet> {
     );
   }
 
-  Widget _checkboxTile(String label) {
-    final checked = _selected.contains(label);
+  Widget _checkboxTile(String id, String label) {
+    final checked = _selected.contains(id);
     return CheckboxListTile(
       value: checked,
       onChanged: (v) {
         setState(() {
           if (v == true) {
-            _selected.add(label);
+            _selected.add(id);
           } else {
-            _selected.remove(label);
+            _selected.remove(id);
           }
         });
       },

@@ -18,6 +18,7 @@ class AddressMapPicker extends StatefulWidget {
     this.onAddressResolved,
     this.height = 220,
     this.showSearch = true,
+    this.resolveOnInit = true,
   });
 
   final double? initialLat;
@@ -26,6 +27,10 @@ class AddressMapPicker extends StatefulWidget {
   final ValueChanged<String>? onAddressResolved;
   final double height;
   final bool showSearch;
+
+  /// Whether to reverse-geocode and fill the address on widget init.
+  /// Set to false when adding a new address so the field starts blank.
+  final bool resolveOnInit;
 
   @override
   State<AddressMapPicker> createState() => _AddressMapPickerState();
@@ -41,7 +46,11 @@ class _AddressMapPickerState extends State<AddressMapPicker> {
     super.initState();
     _pin = _initialPoint();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _notifyLocation(_pin, resolveAddress: widget.onAddressResolved != null);
+      _notifyLocation(
+        _pin,
+        resolveAddress:
+            widget.resolveOnInit && widget.onAddressResolved != null,
+      );
     });
   }
 
@@ -52,7 +61,10 @@ class _AddressMapPickerState extends State<AddressMapPicker> {
     return MapConstants.defaultCenter;
   }
 
-  Future<void> _notifyLocation(LatLng point, {bool resolveAddress = true}) async {
+  Future<void> _notifyLocation(
+    LatLng point, {
+    bool resolveAddress = true,
+  }) async {
     widget.onLocationChanged(point);
     if (!resolveAddress || widget.onAddressResolved == null) return;
 
@@ -196,10 +208,7 @@ class _AddressMapPickerState extends State<AddressMapPicker> {
         const SizedBox(height: 6),
         Text(
           'Search above, tap the map, or drag the pin to set delivery location',
-          style: TextStyle(
-            fontSize: 11,
-            color: Colors.grey.shade600,
-          ),
+          style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
         ),
       ],
     );

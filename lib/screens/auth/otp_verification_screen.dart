@@ -269,8 +269,7 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
                               SizedBox(height: fieldSpacing * 2),
                               AppButton(
                                 label: 'Verify OTP',
-                                onPressed: _onNext,
-                                isLoading: _isLoading,
+                                onPressed: _isLoading ? null : _onNext,
                               ),
                               SizedBox(height: fieldSpacing),
                               TextButton(

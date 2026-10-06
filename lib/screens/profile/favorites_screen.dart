@@ -1,89 +1,112 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+
 import '../../constants/color_constants.dart';
-import '../../models/food_item.dart';
-import '../../services/firestore_service.dart';
+import '../../models/favorite_restaurant.dart';
+import '../../state/favorites_controller.dart';
+import '../../utils/app_navigation.dart';
+import '../../widgets/app_screen_header.dart';
+import '../../widgets/async_state_message.dart';
+import '../../widgets/favorite_restaurant_button.dart';
 import '../restaurant/restaurant_menu_screen.dart';
 
-class FavoritesScreen extends StatelessWidget {
+class FavoritesScreen extends StatefulWidget {
   const FavoritesScreen({super.key, this.embedded = false});
 
   final bool embedded;
 
   @override
+  State<FavoritesScreen> createState() => _FavoritesScreenState();
+}
+
+class _FavoritesScreenState extends State<FavoritesScreen> {
+  int _refreshToken = 0;
+
+  Future<void> _onRefresh() async {
+    setState(() => _refreshToken++);
+    await Future<void>.delayed(const Duration(milliseconds: 400));
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    final favorites = FavoritesScope.maybeOf(context);
+
     return Scaffold(
       backgroundColor: const Color(0xFFF7F7F7),
       body: Column(
         children: [
-          Container(
-            width: double.infinity,
-            padding: EdgeInsets.only(
-              top: MediaQuery.of(context).padding.top + 8,
-              left: 8,
-              right: 16,
-              bottom: 18,
-            ),
-            color: AppColors.primary,
-            child: Row(
-              children: [
-                if (!embedded)
-                  IconButton(
-                    onPressed: () => Navigator.pop(context),
-                    icon: const Icon(
-                      Icons.arrow_back_ios_new_rounded,
-                      color: AppColors.white,
-                      size: 20,
-                    ),
-                  ),
-                const SizedBox(width: 4),
-                const Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Favorites',
-                      style: TextStyle(
-                        color: AppColors.white,
-                        fontSize: 22,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                    Text(
-                      'Your Favourite Dishes',
-                      style: TextStyle(color: AppColors.white, fontSize: 12),
-                    ),
-                  ],
-                ),
-              ],
-            ),
+          AppScreenHeader(
+            title: 'Favorites',
+            subtitle: 'Your favourite restaurants',
+            onBack: widget.embedded ? null : () => Navigator.pop(context),
           ),
           Expanded(
-            child: StreamBuilder<QuerySnapshot>(
-              stream: FirestoreService.activeFoodItems(),
-              builder: (context, snapshot) {
-                if (snapshot.connectionState == ConnectionState.waiting) {
-                  return const Center(child: CircularProgressIndicator());
-                }
+            child: Container(
+              decoration: const BoxDecoration(
+                color: Color(0xFFF7F7F7),
+                borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+              ),
+              clipBehavior: Clip.antiAlias,
+              child: uid == null
+                  ? const Center(
+                      child: Text(
+                        'Sign in to view your favourite restaurants.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: Color(0xFF6B6B6B)),
+                      ),
+                    )
+                  : favorites == null
+                  ? const AsyncStateMessage.loading()
+                  : ListenableBuilder(
+                      key: ValueKey(_refreshToken),
+                      listenable: favorites,
+                      builder: (context, _) {
+                        final items = favorites.favorites;
 
-                final items = (snapshot.data?.docs ?? [])
-                    .map(FoodItem.fromDoc)
-                    .where((f) => f.name.isNotEmpty)
-                    .take(8)
-                    .toList();
+                        if (items.isEmpty) {
+                          return RefreshIndicator(
+                            color: AppColors.primary,
+                            onRefresh: _onRefresh,
+                            child: ListView(
+                              physics: const AlwaysScrollableScrollPhysics(),
+                              children: const [
+                                SizedBox(height: 120),
+                                AsyncStateMessage(
+                                  icon: Icons.favorite_border_rounded,
+                                  message:
+                                      'No favourite restaurants yet.\nTap the heart on a restaurant to save it.',
+                                ),
+                              ],
+                            ),
+                          );
+                        }
 
-                if (items.isEmpty) {
-                  return const Center(child: Text('No favourites yet'));
-                }
-
-                return ListView.separated(
-                  padding: EdgeInsets.fromLTRB(16, 16, 16, embedded ? 100 : 24),
-                  itemCount: items.length,
-                  separatorBuilder: (_, __) => const SizedBox(height: 14),
-                  itemBuilder: (context, index) {
-                    return _FavoriteCard(item: items[index]);
-                  },
-                );
-              },
+                        return RefreshIndicator(
+                          color: AppColors.primary,
+                          onRefresh: _onRefresh,
+                          child: ListView.separated(
+                            physics: const AlwaysScrollableScrollPhysics(
+                              parent: BouncingScrollPhysics(),
+                            ),
+                            padding: EdgeInsets.fromLTRB(
+                              16,
+                              16,
+                              16,
+                              widget.embedded ? 100 : 24,
+                            ),
+                            itemCount: items.length,
+                            separatorBuilder: (_, __) =>
+                                const SizedBox(height: 14),
+                            itemBuilder: (context, index) {
+                              return _FavoriteRestaurantCard(
+                                favorite: items[index],
+                              );
+                            },
+                          ),
+                        );
+                      },
+                    ),
             ),
           ),
         ],
@@ -92,23 +115,20 @@ class FavoritesScreen extends StatelessWidget {
   }
 }
 
-class _FavoriteCard extends StatelessWidget {
-  const _FavoriteCard({required this.item});
+class _FavoriteRestaurantCard extends StatelessWidget {
+  const _FavoriteRestaurantCard({required this.favorite});
 
-  final FoodItem item;
+  final FavoriteRestaurant favorite;
 
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
       onTap: () {
-        Navigator.push(
+        AppNavigation.push(
           context,
-          MaterialPageRoute(
-            builder: (_) => RestaurantMenuScreen(
-              restaurantId: item.restaurantId,
-              restaurantName: item.restaurantName,
-              highlightItem: item,
-            ),
+          RestaurantMenuScreen(
+            restaurantId: favorite.restaurantId,
+            restaurantName: favorite.restaurantName,
           ),
         );
       },
@@ -118,7 +138,7 @@ class _FavoriteCard extends StatelessWidget {
           borderRadius: BorderRadius.circular(16),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withOpacity(0.06),
+              color: Colors.black.withValues(alpha: 0.06),
               blurRadius: 10,
               offset: const Offset(0, 3),
             ),
@@ -134,88 +154,62 @@ class _FavoriteCard extends StatelessWidget {
               child: Stack(
                 fit: StackFit.expand,
                 children: [
-                  item.image.isNotEmpty
+                  favorite.imageUrl.isNotEmpty
                       ? Image.network(
-                          item.image,
+                          favorite.imageUrl,
                           fit: BoxFit.cover,
                           errorBuilder: (_, __, ___) =>
                               Container(color: const Color(0xFFEEEEEE)),
                         )
-                      : Container(color: const Color(0xFFEEEEEE)),
-                  if (item.hasDiscount)
-                    Positioned(
-                      top: 12,
-                      left: 0,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 10,
-                          vertical: 5,
-                        ),
-                        decoration: const BoxDecoration(
-                          color: AppColors.primary,
-                          borderRadius: BorderRadius.only(
-                            topRight: Radius.circular(8),
-                            bottomRight: Radius.circular(8),
+                      : Container(
+                          color: const Color(0xFFFFE8E8),
+                          child: const Center(
+                            child: Icon(
+                              Icons.storefront_rounded,
+                              color: AppColors.primary,
+                              size: 48,
+                            ),
                           ),
                         ),
-                        child: Text(
-                          'Flat ${item.discountPercent}% Off',
-                          style: const TextStyle(
-                            color: AppColors.white,
-                            fontSize: 11,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ),
-                    ),
                   Positioned(
                     top: 10,
                     right: 10,
-                    child: Container(
-                      width: 34,
-                      height: 34,
-                      decoration: BoxDecoration(
-                        color: AppColors.white.withOpacity(0.95),
-                        shape: BoxShape.circle,
-                      ),
-                      child: const Icon(
-                        Icons.favorite_rounded,
-                        size: 18,
-                        color: AppColors.primary,
-                      ),
+                    child: FavoriteRestaurantButton(
+                      restaurant: favorite.toRestaurant(),
                     ),
                   ),
-                  Positioned(
-                    bottom: 10,
-                    right: 10,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 8,
-                        vertical: 4,
-                      ),
-                      decoration: BoxDecoration(
-                        color: AppColors.primary,
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Row(
-                        children: [
-                          Text(
-                            item.rating.toStringAsFixed(1),
-                            style: const TextStyle(
-                              color: AppColors.white,
-                              fontWeight: FontWeight.w700,
-                              fontSize: 12,
+                  if (favorite.rating > 0)
+                    Positioned(
+                      bottom: 10,
+                      right: 10,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 4,
+                        ),
+                        decoration: BoxDecoration(
+                          color: AppColors.primary,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Row(
+                          children: [
+                            Text(
+                              favorite.rating.toStringAsFixed(1),
+                              style: const TextStyle(
+                                color: AppColors.white,
+                                fontWeight: FontWeight.w700,
+                                fontSize: 12,
+                              ),
                             ),
-                          ),
-                          const Icon(
-                            Icons.star_rounded,
-                            size: 13,
-                            color: AppColors.white,
-                          ),
-                        ],
+                            const Icon(
+                              Icons.star_rounded,
+                              size: 13,
+                              color: AppColors.white,
+                            ),
+                          ],
+                        ),
                       ),
                     ),
-                  ),
                 ],
               ),
             ),
@@ -225,40 +219,46 @@ class _FavoriteCard extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    '${item.restaurantName} Kitchen',
+                    favorite.restaurantName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
                       fontSize: 15,
                       fontWeight: FontWeight.w800,
                     ),
                   ),
-                  const SizedBox(height: 4),
-                  Text(
-                    item.name,
-                    style: const TextStyle(
-                      fontSize: 13,
-                      color: Color(0xFF6B6B6B),
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      Text(
-                        '₹${item.displayPrice} for One',
-                        style: const TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w700,
-                        ),
+                  if (favorite.cuisine.isNotEmpty) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      favorite.cuisine,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 13,
+                        color: Color(0xFF6B6B6B),
                       ),
-                      const Spacer(),
-                      Text(
-                        '${item.preparationTime} Min',
-                        style: const TextStyle(
-                          fontSize: 12,
+                    ),
+                  ],
+                  if (favorite.deliveryTime.isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        const Icon(
+                          Icons.access_time_rounded,
+                          size: 14,
                           color: Color(0xFF6B6B6B),
                         ),
-                      ),
-                    ],
-                  ),
+                        const SizedBox(width: 4),
+                        Text(
+                          favorite.deliveryTime,
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: Color(0xFF6B6B6B),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
                 ],
               ),
             ),

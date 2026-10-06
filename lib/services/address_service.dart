@@ -1,9 +1,11 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+
 import '../models/delivery_address.dart';
 import 'firestore_paths.dart';
 
-/// User-scoped addresses: `customers/{uid}/addresses/{addressId}`.
+/// User addresses on Admin `customers/{uid}.addresses[]`
+/// (same pattern as `favorites` — works with customer-doc rules).
 class AddressService {
   AddressService._();
 
@@ -11,25 +13,13 @@ class AddressService {
 
   static String? get _uid => FirebaseAuth.instance.currentUser?.uid;
 
-  static CollectionReference<Map<String, dynamic>> _col(String uid) {
-    return _db
-        .collection(FirestorePaths.customers)
-        .doc(uid)
-        .collection('addresses');
+  static DocumentReference<Map<String, dynamic>> _customerRef(String uid) {
+    return _db.collection(FirestorePaths.customers).doc(uid);
   }
 
   static Stream<List<DeliveryAddress>> watchForUser(String uid) {
-    return _col(uid).snapshots().map((snap) {
-      final list = snap.docs
-          .map(DeliveryAddress.fromDoc)
-          .where((a) => a.isValid)
-          .toList();
-      // Default first, then label.
-      list.sort((a, b) {
-        if (a.isDefault != b.isDefault) return a.isDefault ? -1 : 1;
-        return a.label.toLowerCase().compareTo(b.label.toLowerCase());
-      });
-      return list;
+    return _customerRef(uid).snapshots().map((snap) {
+      return _parseList(snap.data()?['addresses']);
     });
   }
 
@@ -53,38 +43,45 @@ class AddressService {
       throw StateError('Sign in required to save an address.');
     }
 
-    final existing = await _col(uid).get();
-    final shouldDefault = makeDefault || existing.docs.isEmpty;
+    final id = 'addr_${DateTime.now().millisecondsSinceEpoch}';
 
-    if (shouldDefault) {
-      await _clearDefaults(uid);
-    }
+    await _db.runTransaction((tx) async {
+      final ref = _customerRef(uid);
+      final snap = await tx.get(ref);
+      final current = _parseList(snap.data()?['addresses']);
+      final shouldDefault = makeDefault || current.isEmpty;
 
-    final ref = _col(uid).doc();
-    final address = DeliveryAddress(
-      id: ref.id,
-      label: label,
-      fullAddress: fullAddress,
-      landmark: landmark,
-      phone: phone,
-      lat: lat,
-      lng: lng,
-      isDefault: shouldDefault,
-    );
+      final next = current
+          .map(
+            (a) => a.copyWith(isDefault: shouldDefault ? false : a.isDefault),
+          )
+          .toList();
 
-    await ref.set({
-      ...address.toMap(),
-      'userId': uid,
-      'createdAt': FieldValue.serverTimestamp(),
-      'updatedAt': FieldValue.serverTimestamp(),
+      final saved = DeliveryAddress(
+        id: id,
+        label: label,
+        fullAddress: fullAddress,
+        landmark: landmark,
+        phone: phone,
+        lat: lat,
+        lng: lng,
+        isDefault: shouldDefault,
+      );
+      next.insert(0, saved);
+
+      tx.set(
+        ref,
+        {
+          'id': uid,
+          'addresses': next.map((a) => a.toMap()).toList(),
+          if (shouldDefault) 'defaultAddress': saved.toMap(),
+          'updatedAt': FieldValue.serverTimestamp(),
+        },
+        SetOptions(merge: true),
+      );
     });
 
-    // Mirror default onto customer doc for quick reads / Admin.
-    if (shouldDefault) {
-      await _mirrorDefault(uid, address);
-    }
-
-    return ref.id;
+    return id;
   }
 
   static Future<void> updateAddress(DeliveryAddress address) async {
@@ -92,76 +89,113 @@ class AddressService {
     if (uid == null || address.id.isEmpty) {
       throw StateError('Invalid address update.');
     }
-    await _col(uid).doc(address.id).set({
-      ...address.toMap(),
-      'userId': uid,
-      'updatedAt': FieldValue.serverTimestamp(),
-    }, SetOptions(merge: true));
 
-    if (address.isDefault) {
-      await _clearDefaults(uid, exceptId: address.id);
-      await _mirrorDefault(uid, address);
-    }
+    await _db.runTransaction((tx) async {
+      final ref = _customerRef(uid);
+      final snap = await tx.get(ref);
+      var current = _parseList(snap.data()?['addresses']);
+      final index = current.indexWhere((a) => a.id == address.id);
+      if (index < 0) {
+        throw StateError('Address not found.');
+      }
+
+      var updated = address;
+      if (address.isDefault) {
+        current = current
+            .map((a) => a.copyWith(isDefault: a.id == address.id))
+            .toList();
+        updated = address.copyWith(isDefault: true);
+      }
+
+      current[index] = updated;
+
+      tx.set(
+        ref,
+        {
+          'addresses': current.map((a) => a.toMap()).toList(),
+          if (updated.isDefault) 'defaultAddress': updated.toMap(),
+          'updatedAt': FieldValue.serverTimestamp(),
+        },
+        SetOptions(merge: true),
+      );
+    });
   }
 
   static Future<void> deleteAddress(String addressId) async {
     final uid = _uid;
     if (uid == null || addressId.isEmpty) return;
 
-    final doc = await _col(uid).doc(addressId).get();
-    final wasDefault = doc.data()?['isDefault'] == true;
-    await _col(uid).doc(addressId).delete();
+    await _db.runTransaction((tx) async {
+      final ref = _customerRef(uid);
+      final snap = await tx.get(ref);
+      final current = _parseList(snap.data()?['addresses']);
+      final removed = current.where((a) => a.id == addressId).toList();
+      if (removed.isEmpty) return;
 
-    if (wasDefault) {
-      final remaining = await _col(uid).limit(1).get();
-      if (remaining.docs.isNotEmpty) {
-        await setDefault(remaining.docs.first.id);
-      } else {
-        await _db.collection(FirestorePaths.customers).doc(uid).set({
-          'defaultAddress': FieldValue.delete(),
-          'updatedAt': FieldValue.serverTimestamp(),
-        }, SetOptions(merge: true));
+      final wasDefault = removed.first.isDefault;
+      var next = current.where((a) => a.id != addressId).toList();
+
+      DeliveryAddress? newDefault;
+      if (wasDefault && next.isNotEmpty) {
+        newDefault = next.first.copyWith(isDefault: true);
+        next = [
+          newDefault,
+          ...next.skip(1).map((a) => a.copyWith(isDefault: false)),
+        ];
       }
-    }
+
+      final payload = <String, dynamic>{
+        'addresses': next.map((a) => a.toMap()).toList(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      };
+      if (newDefault != null) {
+        payload['defaultAddress'] = newDefault.toMap();
+      } else if (wasDefault) {
+        payload['defaultAddress'] = FieldValue.delete();
+      }
+
+      tx.set(ref, payload, SetOptions(merge: true));
+    });
   }
 
   static Future<void> setDefault(String addressId) async {
     final uid = _uid;
     if (uid == null || addressId.isEmpty) return;
 
-    await _clearDefaults(uid, exceptId: addressId);
-    final ref = _col(uid).doc(addressId);
-    await ref.set({
-      'isDefault': true,
-      'updatedAt': FieldValue.serverTimestamp(),
-    }, SetOptions(merge: true));
+    await _db.runTransaction((tx) async {
+      final ref = _customerRef(uid);
+      final snap = await tx.get(ref);
+      final current = _parseList(snap.data()?['addresses']);
+      if (!current.any((a) => a.id == addressId)) return;
 
-    final snap = await ref.get();
-    if (snap.exists) {
-      await _mirrorDefault(uid, DeliveryAddress.fromDoc(snap));
-    }
+      final next = current
+          .map((a) => a.copyWith(isDefault: a.id == addressId))
+          .toList();
+      final def = next.firstWhere((a) => a.id == addressId);
+
+      tx.set(
+        ref,
+        {
+          'addresses': next.map((a) => a.toMap()).toList(),
+          'defaultAddress': def.toMap(),
+          'updatedAt': FieldValue.serverTimestamp(),
+        },
+        SetOptions(merge: true),
+      );
+    });
   }
 
-  static Future<void> _clearDefaults(String uid, {String? exceptId}) async {
-    final snap = await _col(uid).where('isDefault', isEqualTo: true).get();
-    final batch = _db.batch();
-    for (final d in snap.docs) {
-      if (exceptId != null && d.id == exceptId) continue;
-      batch.update(d.reference, {
-        'isDefault': false,
-        'updatedAt': FieldValue.serverTimestamp(),
-      });
-    }
-    await batch.commit();
-  }
-
-  static Future<void> _mirrorDefault(
-    String uid,
-    DeliveryAddress address,
-  ) async {
-    await _db.collection(FirestorePaths.customers).doc(uid).set({
-      'defaultAddress': address.toMap(),
-      'updatedAt': FieldValue.serverTimestamp(),
-    }, SetOptions(merge: true));
+  static List<DeliveryAddress> _parseList(dynamic raw) {
+    if (raw is! List) return const [];
+    final list = raw
+        .whereType<Map>()
+        .map((e) => DeliveryAddress.fromMap(Map<String, dynamic>.from(e)))
+        .where((a) => a.isValid)
+        .toList();
+    list.sort((a, b) {
+      if (a.isDefault != b.isDefault) return a.isDefault ? -1 : 1;
+      return a.label.toLowerCase().compareTo(b.label.toLowerCase());
+    });
+    return list;
   }
 }

@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
 import '../../constants/color_constants.dart';
+import '../../global_widgets/app_back_button.dart';
 import '../../global_widgets/app_button.dart';
 import '../../global_widgets/app_text_field.dart';
 import '../../global_widgets/loading_overlay.dart';
@@ -22,8 +25,12 @@ class _SignupScreenState extends State<SignupScreen> {
   final _emailCtrl = TextEditingController();
   final _passwordCtrl = TextEditingController();
   final _confirmCtrl = TextEditingController();
+
   bool _isLoading = false;
   bool _agreedToTerms = false;
+  bool _submittedOnce = false;
+
+  static final _emailRegex = RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$');
 
   @override
   void dispose() {
@@ -34,52 +41,125 @@ class _SignupScreenState extends State<SignupScreen> {
     super.dispose();
   }
 
+  void _dismissKeyboard() {
+    FocusScope.of(context).unfocus();
+    SystemChannels.textInput.invokeMethod('TextInput.hide');
+  }
+
+  void _goToAuthenticatedHome() {
+    if (!mounted) return;
+    // Signup was pushed on top of AuthGate; pop so AuthGate can show Home.
+    Navigator.of(context).popUntil((route) => route.isFirst);
+  }
+
   Future<void> _onSignup() async {
+    if (_isLoading) return;
+
+    setState(() => _submittedOnce = true);
     if (!(_formKey.currentState?.validate() ?? false)) return;
+
     if (!_agreedToTerms) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please accept the terms to continue.')),
-      );
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(
+            content: Text('Please accept the terms to continue.'),
+            behavior: SnackBarBehavior.floating,
+            backgroundColor: AppColors.error,
+          ),
+        );
       return;
     }
+
+    _dismissKeyboard();
     setState(() => _isLoading = true);
+
     try {
       await AuthService.signup(
         name: _nameCtrl.text.trim(),
         email: _emailCtrl.text.trim(),
         password: _passwordCtrl.text,
       );
-      // AuthGate switches to Home when auth state updates.
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(
+            content: Text('Account created successfully'),
+            backgroundColor: AppColors.success,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      _goToAuthenticatedHome();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(_friendlySignupError(e)),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(
+            content: Text(AuthService.messageFromError(e)),
+            behavior: SnackBarBehavior.floating,
+            backgroundColor: AppColors.error,
+          ),
+        );
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
   }
 
-  String _friendlySignupError(Object e) => AuthService.messageFromError(e);
-
   Future<void> _onGoogle() async {
+    if (_isLoading) return;
+
+    _dismissKeyboard();
     setState(() => _isLoading = true);
     try {
       await AuthService.signInWithGoogle();
+      if (!mounted) return;
+      _goToAuthenticatedHome();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(AuthService.messageFromError(e)),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(
+            content: Text(AuthService.messageFromError(e)),
+            behavior: SnackBarBehavior.floating,
+            backgroundColor: AppColors.error,
+          ),
+        );
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
+  }
+
+  String? _validateName(String? value) {
+    final name = value?.trim() ?? '';
+    if (name.isEmpty) return 'Name is required';
+    if (name.length < 2) return 'Enter your full name';
+    return null;
+  }
+
+  String? _validateEmail(String? value) {
+    final email = value?.trim() ?? '';
+    if (email.isEmpty) return 'Email is required';
+    if (!_emailRegex.hasMatch(email.toLowerCase())) {
+      return 'Enter a valid email address';
+    }
+    return null;
+  }
+
+  String? _validatePassword(String? value) {
+    if (value == null || value.isEmpty) return 'Password is required';
+    if (value.length < 6) return 'At least 6 characters';
+    return null;
+  }
+
+  String? _validateConfirm(String? value) {
+    if (value == null || value.isEmpty) {
+      return 'Please confirm your password';
+    }
+    if (value != _passwordCtrl.text) return 'Passwords do not match';
+    return null;
   }
 
   @override
@@ -121,7 +201,7 @@ class _SignupScreenState extends State<SignupScreen> {
             : AppBar(
                 backgroundColor: AppColors.primary,
                 elevation: 0,
-                leading: const BackButton(color: AppColors.textDark),
+                leading: const AppBackButton(),
               ),
         body: SafeArea(
           top: false,
@@ -138,94 +218,51 @@ class _SignupScreenState extends State<SignupScreen> {
                       constraints: BoxConstraints(maxWidth: maxWidth),
                       child: Form(
                         key: _formKey,
+                        autovalidateMode: _submittedOnce
+                            ? AutovalidateMode.onUserInteraction
+                            : AutovalidateMode.disabled,
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
                             SizedBox(height: topPad),
-
-                            // ── Header ────────────────────────────────────
                             const AuthHeader(),
-
                             SizedBox(height: fieldSpacing * 2),
-
-                            // ── Full name ─────────────────────────────────
                             AppTextField(
                               label: 'Full Name',
                               hint: 'John Doe',
                               controller: _nameCtrl,
                               keyboardType: TextInputType.name,
                               prefixIcon: Icons.person_outline_rounded,
-                              validator: (v) {
-                                if (v == null || v.trim().isEmpty) {
-                                  return 'Name is required';
-                                }
-                                return null;
-                              },
+                              validator: _validateName,
                             ),
-
                             SizedBox(height: fieldSpacing),
-
-                            // ── Email ─────────────────────────────────────
                             AppTextField(
                               label: 'Email',
                               hint: 'you@example.com',
                               controller: _emailCtrl,
                               keyboardType: TextInputType.emailAddress,
                               prefixIcon: Icons.mail_outline_rounded,
-                              validator: (v) {
-                                if (v == null || v.trim().isEmpty) {
-                                  return 'Email is required';
-                                }
-                                if (!v.contains('@')) {
-                                  return 'Enter a valid email';
-                                }
-                                return null;
-                              },
+                              validator: _validateEmail,
                             ),
-
                             SizedBox(height: fieldSpacing),
-
-                            // ── Password ──────────────────────────────────
                             AppTextField(
                               label: 'Password',
                               hint: '••••••••',
                               controller: _passwordCtrl,
                               isPassword: true,
                               prefixIcon: Icons.lock_outline_rounded,
-                              validator: (v) {
-                                if (v == null || v.isEmpty) {
-                                  return 'Password is required';
-                                }
-                                if (v.length < 6) {
-                                  return 'At least 6 characters';
-                                }
-                                return null;
-                              },
+                              validator: _validatePassword,
                             ),
-
                             SizedBox(height: fieldSpacing),
-
-                            // ── Confirm password ──────────────────────────
                             AppTextField(
                               label: 'Confirm Password',
                               hint: '••••••••',
                               controller: _confirmCtrl,
                               isPassword: true,
                               prefixIcon: Icons.lock_outline_rounded,
-                              validator: (v) {
-                                if (v == null || v.isEmpty) {
-                                  return 'Please confirm your password';
-                                }
-                                if (v != _passwordCtrl.text) {
-                                  return 'Passwords do not match';
-                                }
-                                return null;
-                              },
+                              validator: _validateConfirm,
                             ),
-
                             SizedBox(height: fieldSpacing),
-
-                            // ── Terms checkbox ────────────────────────────
                             Row(
                               crossAxisAlignment: CrossAxisAlignment.center,
                               children: [
@@ -238,9 +275,11 @@ class _SignupScreenState extends State<SignupScreen> {
                                     shape: RoundedRectangleBorder(
                                       borderRadius: BorderRadius.circular(4),
                                     ),
-                                    onChanged: (v) => setState(
-                                      () => _agreedToTerms = v ?? false,
-                                    ),
+                                    onChanged: _isLoading
+                                        ? null
+                                        : (v) => setState(
+                                            () => _agreedToTerms = v ?? false,
+                                          ),
                                   ),
                                 ),
                                 const SizedBox(width: 8),
@@ -276,30 +315,23 @@ class _SignupScreenState extends State<SignupScreen> {
                                 ),
                               ],
                             ),
-
                             SizedBox(height: fieldSpacing * 1.5),
-
-                            // ── Sign up button ────────────────────────────
                             AppButton(
                               label: 'Create Account',
-                              onPressed: _onSignup,
-                              isLoading: _isLoading,
+                              onPressed: _isLoading ? null : _onSignup,
                             ),
-
                             SizedBox(height: fieldSpacing * 1.5),
-
-                            // ── Social auth ───────────────────────────────
-                            SocialAuthRow(onGoogleTap: _onGoogle),
-
+                            SocialAuthRow(
+                              onGoogleTap: _isLoading ? null : _onGoogle,
+                            ),
                             SizedBox(height: fieldSpacing * 2),
-
-                            // ── Footer link ───────────────────────────────
                             AuthFooterLink(
                               question: 'Already have an account?',
                               actionLabel: 'Sign In',
-                              onTap: () => Navigator.of(context).pop(),
+                              onTap: _isLoading
+                                  ? null
+                                  : () => Navigator.of(context).pop(),
                             ),
-
                             SizedBox(height: topPad / 2),
                           ],
                         ),

@@ -46,9 +46,38 @@ class FoodItem {
 
   bool get hasDiscount => discountedPrice > 0 && discountedPrice < price;
 
-  int get discountPercent => hasDiscount
-      ? (((price - discountedPrice) / price) * 100).round()
-      : 0;
+  int get discountPercent =>
+      hasDiscount ? (((price - discountedPrice) / price) * 100).round() : 0;
+
+  /// Returns a copy of this item with [offerPrice] as the effective unit price.
+  ///
+  /// Sets [discountedPrice] so that [displayPrice] == [offerPrice], which
+  /// means the cart line stores the offer-discounted price without any
+  /// special handling in [CartController].
+  FoodItem withOfferPrice(int offerPrice) {
+    // Clamp: offer cannot exceed the original price.
+    final clamped = offerPrice.clamp(0, price);
+    return FoodItem(
+      id: id,
+      name: name,
+      description: description,
+      image: image,
+      categoryId: categoryId,
+      categoryName: categoryName,
+      restaurantId: restaurantId,
+      restaurantName: restaurantName,
+      price: price,
+      discountedPrice: clamped,
+      preparationTime: preparationTime,
+      rating: rating,
+      totalRatings: totalRatings,
+      isVeg: isVeg,
+      available: available,
+      inStock: inStock,
+      tags: tags,
+      status: status,
+    );
+  }
 
   factory FoodItem.fromDoc(DocumentSnapshot doc) {
     final d = doc.data() as Map<String, dynamic>? ?? {};

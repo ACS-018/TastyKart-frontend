@@ -1,4 +1,4 @@
-package com.arrowcoders.fooapp
+package com.arrowcoders.tasty_kart
 
 import io.flutter.embedding.android.FlutterActivity
 

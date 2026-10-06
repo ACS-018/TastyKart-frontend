@@ -1,6 +1,8 @@
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../../constants/color_constants.dart';
+import '../../services/firestore_service.dart';
 
 class CardDetailsScreen extends StatefulWidget {
   const CardDetailsScreen({super.key});
@@ -16,6 +18,8 @@ class _CardDetailsScreenState extends State<CardDetailsScreen> {
   final _cvv = TextEditingController();
   final _expiry = TextEditingController();
 
+  bool _saving = false;
+
   @override
   void dispose() {
     _number.dispose();
@@ -24,6 +28,92 @@ class _CardDetailsScreenState extends State<CardDetailsScreen> {
     _cvv.dispose();
     _expiry.dispose();
     super.dispose();
+  }
+
+  // Returns null (valid) or an error string.
+  String? _validateCard() {
+    final number = _number.text.trim();
+    final name = _name.text.trim();
+    final cvv = _cvv.text.trim();
+    final expiry = _expiry.text.trim();
+
+    if (number.length < 16) return 'Enter a valid 16-digit card number';
+    if (name.isEmpty) return 'Enter the name on card';
+    if (cvv.length < 3) return 'Enter a valid CVV';
+    if (expiry.isEmpty) return 'Enter the expiry date (MM/YY)';
+
+    final parts = expiry.split('/');
+    if (parts.length != 2 ||
+        parts[0].length != 2 ||
+        (parts[1].length != 2 && parts[1].length != 4)) {
+      return 'Expiry must be MM/YY or MM/YYYY';
+    }
+    final month = int.tryParse(parts[0]);
+    if (month == null || month < 1 || month > 12) {
+      return 'Enter a valid expiry month (01–12)';
+    }
+    return null;
+  }
+
+  /// Masks a raw 16-digit string → "**** **** **** 4242"
+  String _maskNumber(String raw) {
+    final digits = raw.replaceAll(RegExp(r'\D'), '');
+    final last4 = digits.length >= 4
+        ? digits.substring(digits.length - 4)
+        : digits;
+    return '**** **** **** $last4';
+  }
+
+  Future<void> _onMakePayment() async {
+    final error = _validateCard();
+    if (error != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(error),
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: const Color(0xFFB32B2C),
+        ),
+      );
+      return;
+    }
+
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Please sign in to save a card'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
+
+    setState(() => _saving = true);
+
+    try {
+      final saved = await FirestoreService.saveCard(
+        uid: user.uid,
+        maskedNumber: _maskNumber(_number.text.trim()),
+        cardHolder: _name.text.trim(),
+        expiry: _expiry.text.trim(),
+        nickname: _nick.text.trim().isEmpty ? null : _nick.text.trim(),
+      );
+
+      if (!mounted) return;
+      // Pop with the saved card so PaymentOptionsScreen can select it.
+      Navigator.pop(context, saved);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Failed to save card: $e'),
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: const Color(0xFFB32B2C),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
   }
 
   InputDecoration _decoration(String label) {
@@ -52,6 +142,7 @@ class _CardDetailsScreenState extends State<CardDetailsScreen> {
       backgroundColor: const Color(0xFFF7F7F7),
       body: Column(
         children: [
+          // ── Header ──────────────────────────────────────────────────────
           Container(
             width: double.infinity,
             padding: EdgeInsets.only(
@@ -64,7 +155,7 @@ class _CardDetailsScreenState extends State<CardDetailsScreen> {
             child: Row(
               children: [
                 IconButton(
-                  onPressed: () => Navigator.pop(context),
+                  onPressed: _saving ? null : () => Navigator.pop(context),
                   icon: const Icon(
                     Icons.arrow_back_ios_new_rounded,
                     color: AppColors.white,
@@ -92,10 +183,13 @@ class _CardDetailsScreenState extends State<CardDetailsScreen> {
               ],
             ),
           ),
+
+          // ── Form ─────────────────────────────────────────────────────────
           Expanded(
             child: ListView(
               padding: const EdgeInsets.fromLTRB(16, 20, 16, 24),
               children: [
+                // Card number — digits only, max 16
                 TextField(
                   controller: _number,
                   keyboardType: TextInputType.number,
@@ -114,7 +208,7 @@ class _CardDetailsScreenState extends State<CardDetailsScreen> {
                 const SizedBox(height: 14),
                 TextField(
                   controller: _nick,
-                  decoration: _decoration('Card Nick Name'),
+                  decoration: _decoration('Card Nickname (optional)'),
                 ),
                 const SizedBox(height: 14),
                 Row(
@@ -136,7 +230,29 @@ class _CardDetailsScreenState extends State<CardDetailsScreen> {
                       child: TextField(
                         controller: _expiry,
                         keyboardType: TextInputType.datetime,
-                        decoration: _decoration('Expiry Date'),
+                        inputFormatters: [_ExpiryDateFormatter()],
+                        decoration: _decoration('Expiry (MM/YY)'),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 18),
+                // Hint that CVV is never stored
+                Row(
+                  children: [
+                    Icon(
+                      Icons.lock_outline_rounded,
+                      size: 14,
+                      color: Colors.grey.shade500,
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        'CVV is never stored. Only the last 4 digits of your card are saved.',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Colors.grey.shade500,
+                        ),
                       ),
                     ),
                   ],
@@ -144,6 +260,8 @@ class _CardDetailsScreenState extends State<CardDetailsScreen> {
               ],
             ),
           ),
+
+          // ── Make Payment button ──────────────────────────────────────────
           SafeArea(
             top: false,
             child: Padding(
@@ -152,28 +270,64 @@ class _CardDetailsScreenState extends State<CardDetailsScreen> {
                 width: double.infinity,
                 height: 52,
                 child: ElevatedButton(
-                  onPressed: () => Navigator.pop(context, true),
+                  onPressed: _saving ? null : _onMakePayment,
                   style: ElevatedButton.styleFrom(
                     backgroundColor: AppColors.primary,
                     foregroundColor: AppColors.white,
+                    disabledBackgroundColor: AppColors.primary.withValues(
+                      alpha: 0.6,
+                    ),
                     elevation: 0,
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(14),
                     ),
                   ),
-                  child: const Text(
-                    'Make Payment',
-                    style: TextStyle(
-                      fontWeight: FontWeight.w800,
-                      fontSize: 15,
-                    ),
-                  ),
+                  child: _saving
+                      ? const SizedBox(
+                          width: 22,
+                          height: 22,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: AppColors.white,
+                          ),
+                        )
+                      : const Text(
+                          'Make Payment',
+                          style: TextStyle(
+                            fontWeight: FontWeight.w800,
+                            fontSize: 15,
+                          ),
+                        ),
                 ),
               ),
             ),
           ),
         ],
       ),
+    );
+  }
+}
+
+/// Auto-inserts '/' after the two-digit month so the field reads MM/YY.
+class _ExpiryDateFormatter extends TextInputFormatter {
+  @override
+  TextEditingValue formatEditUpdate(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    var text = newValue.text.replaceAll(RegExp(r'[^0-9]'), '');
+    if (text.length > 4) text = text.substring(0, 4);
+
+    final buffer = StringBuffer();
+    for (var i = 0; i < text.length; i++) {
+      if (i == 2) buffer.write('/');
+      buffer.write(text[i]);
+    }
+
+    final formatted = buffer.toString();
+    return TextEditingValue(
+      text: formatted,
+      selection: TextSelection.collapsed(offset: formatted.length),
     );
   }
 }

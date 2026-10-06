@@ -1,7 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 /// Saved delivery address for a signed-in customer.
-/// Stored at `customers/{userId}/addresses/{id}`.
+/// Stored on Admin `customers/{userId}.addresses[]`.
 class DeliveryAddress {
   final String id;
   final String label;
@@ -61,18 +61,27 @@ class DeliveryAddress {
     };
   }
 
+  factory DeliveryAddress.fromMap(Map<String, dynamic> map) {
+    return DeliveryAddress(
+      id: (map['id'] as String? ?? '').trim(),
+      label: (map['label'] as String? ?? 'Home').trim(),
+      fullAddress: (map['fullAddress'] as String? ??
+              map['address'] as String? ??
+              '')
+          .trim(),
+      landmark: map['landmark'] as String?,
+      phone: map['phone'] as String?,
+      lat: (map['lat'] as num?)?.toDouble(),
+      lng: (map['lng'] as num?)?.toDouble(),
+      isDefault: map['isDefault'] as bool? ?? false,
+    );
+  }
+
   factory DeliveryAddress.fromDoc(DocumentSnapshot doc) {
     final d = doc.data() as Map<String, dynamic>? ?? {};
-    return DeliveryAddress(
-      id: d['id'] as String? ?? doc.id,
-      label: (d['label'] as String? ?? 'Home').trim(),
-      fullAddress: (d['fullAddress'] as String? ?? '').trim(),
-      landmark: d['landmark'] as String?,
-      phone: d['phone'] as String?,
-      lat: (d['lat'] as num?)?.toDouble(),
-      lng: (d['lng'] as num?)?.toDouble(),
-      isDefault: d['isDefault'] as bool? ?? false,
-    );
+    final fromMap = DeliveryAddress.fromMap(Map<String, dynamic>.from(d));
+    if (fromMap.id.isNotEmpty) return fromMap;
+    return fromMap.copyWith(id: doc.id);
   }
 
   /// Prefer default address; otherwise first saved address.

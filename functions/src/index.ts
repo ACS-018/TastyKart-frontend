@@ -1,5 +1,6 @@
 import * as crypto from "crypto";
 import {initializeApp} from "firebase-admin/app";
+import {getMessaging} from "firebase-admin/messaging";
 import {
   FieldValue,
   getFirestore,
@@ -9,6 +10,7 @@ import {
 import {logger} from "firebase-functions";
 import {defineSecret} from "firebase-functions/params";
 import {HttpsError, onCall, onRequest} from "firebase-functions/v2/https";
+import {onDocumentCreated, onDocumentUpdated} from "firebase-functions/v2/firestore";
 import Razorpay = require("razorpay");
 
 initializeApp();
@@ -51,10 +53,15 @@ function computePayablePaise(order: OrderDoc): number {
     itemsSum += price * qty;
   }
   const tax = Number(order.tax ?? 0);
-  const deliveryFee = Number(order.deliveryFee ?? 0);
+  const deliveryFee = Number(order.deliveryFee ?? 0);  // already includes surgeFee
   const platformFee = Number(order.platformFee ?? 0);
   const discount = Number(order.discount ?? 0);
-  const recomputed = itemsSum + tax + deliveryFee + platformFee - discount;
+  const tip = Number(order.tip ?? 0);              // customer tip (optional)
+  const walletUsed = Number(order.walletUsed ?? 0); // wallet credit deducted from total
+
+  // Mirror the Flutter grandTotal formula:
+  //   itemsTotal + deliveryFee + tax + platformFee - discount + tip - walletUsed
+  const recomputed = itemsSum + tax + deliveryFee + platformFee - discount + tip - walletUsed;
 
   if (total <= 0) {
     throw new HttpsError("failed-precondition", "Order has no payable total.");
@@ -64,6 +71,13 @@ function computePayablePaise(order: OrderDoc): number {
       orderId: order.id,
       total,
       recomputed,
+      itemsSum,
+      tax,
+      deliveryFee,
+      platformFee,
+      discount,
+      tip,
+      walletUsed,
     });
     throw new HttpsError(
       "failed-precondition",
@@ -118,6 +132,33 @@ async function markPaymentProcessedIdempotent(
   }
 }
 
+/**
+ * Resolves the order data from either `pendingPayments` or `orders`.
+ * Returns { ref, data, isPending } where isPending=true means the doc
+ * lives in pendingPayments and must be promoted to orders on success.
+ */
+async function resolveOrderDoc(firestoreOrderId: string): Promise<{
+  ref: FirebaseFirestore.DocumentReference;
+  data: OrderDoc;
+  isPending: boolean;
+}> {
+  const pendingRef = db.collection("pendingPayments").doc(firestoreOrderId);
+  const pendingSnap = await pendingRef.get();
+  if (pendingSnap.exists) {
+    return {ref: pendingRef, data: pendingSnap.data() as OrderDoc, isPending: true};
+  }
+  const orderRef = db.collection("orders").doc(firestoreOrderId);
+  const orderSnap = await orderRef.get();
+  if (orderSnap.exists) {
+    return {ref: orderRef, data: orderSnap.data() as OrderDoc, isPending: false};
+  }
+  throw new HttpsError("not-found", "Order not found.");
+}
+
+/**
+ * Promotes a pendingPayments doc into orders and deletes the pending doc.
+ * If it's already in orders (legacy or COD), just updates it.
+ */
 async function applyPaidUpdate(params: {
   firestoreOrderId: string;
   razorpayOrderId: string;
@@ -126,59 +167,81 @@ async function applyPaidUpdate(params: {
   currency: string;
   source: "verify" | "webhook";
 }): Promise<void> {
-  const orderRef = db.collection("orders").doc(params.firestoreOrderId);
-  await db.runTransaction(async (tx: Transaction) => {
-    const snap = await tx.get(orderRef);
-    if (!snap.exists) {
-      throw new HttpsError("not-found", "Order not found.");
-    }
-    const data = snap.data() || {};
-    if (data.paymentVerified === true && data.paymentStatus === "paid") {
-      return;
-    }
-    if (
-      data.razorpayOrderId &&
-      data.razorpayOrderId !== params.razorpayOrderId
-    ) {
-      throw new HttpsError(
-        "failed-precondition",
-        "Razorpay order ID does not match this order."
-      );
-    }
-    const expectedPaise = computePayablePaise(data);
-    if (params.amountPaise !== expectedPaise) {
-      throw new HttpsError("failed-precondition", "Payment amount mismatch.");
-    }
-    if ((params.currency || "").toUpperCase() !== CURRENCY) {
-      throw new HttpsError("failed-precondition", "Currency mismatch.");
-    }
+  const {ref: sourceRef, data, isPending} = await resolveOrderDoc(params.firestoreOrderId);
 
-    tx.update(orderRef, {
-      paymentStatus: "paid",
-      paymentVerified: true,
-      razorpayOrderId: params.razorpayOrderId,
-      razorpayPaymentId: params.razorpayPaymentId,
-      paidAmount: params.amountPaise / 100,
-      paidAmountPaise: params.amountPaise,
-      currency: CURRENCY,
-      paymentVerifiedAt: FieldValue.serverTimestamp(),
-      paymentSource: params.source,
-      updatedAt: FieldValue.serverTimestamp(),
-      timeline: FieldValue.arrayUnion({
-        status: "payment_paid",
-        time: new Date().toISOString(),
-        source: params.source,
-      }),
+  // Idempotency: already paid
+  if (data.paymentVerified === true && data.paymentStatus === "paid") return;
+
+  if (
+    data.razorpayOrderId &&
+    data.razorpayOrderId !== params.razorpayOrderId
+  ) {
+    throw new HttpsError(
+      "failed-precondition",
+      "Razorpay order ID does not match this order."
+    );
+  }
+  const expectedPaise = computePayablePaise(data);
+  if (params.amountPaise !== expectedPaise) {
+    throw new HttpsError("failed-precondition", "Payment amount mismatch.");
+  }
+  if ((params.currency || "").toUpperCase() !== CURRENCY) {
+    throw new HttpsError("failed-precondition", "Currency mismatch.");
+  }
+
+  const paymentFields = {
+    paymentStatus: "paid",
+    paymentVerified: true,
+    razorpayOrderId: params.razorpayOrderId,
+    razorpayPaymentId: params.razorpayPaymentId,
+    paidAmount: params.amountPaise / 100,
+    paidAmountPaise: params.amountPaise,
+    currency: CURRENCY,
+    paymentVerifiedAt: FieldValue.serverTimestamp(),
+    paymentSource: params.source,
+    updatedAt: FieldValue.serverTimestamp(),
+    timeline: FieldValue.arrayUnion({
+      status: "payment_paid",
+      time: new Date().toISOString(),
+      source: params.source,
+    }),
+  };
+
+  if (isPending) {
+    // Promote: write the full doc to orders, then delete the pending doc.
+    const orderRef = db.collection("orders").doc(params.firestoreOrderId);
+    const promotedDoc = {
+      ...data,
+      ...paymentFields,
+      // Remove placeholder flags before promoting
+      isPlaceholder: FieldValue.delete(),
+    };
+    await orderRef.set(promotedDoc, {merge: false});
+    await sourceRef.delete();
+    logger.info("Promoted pendingPayments → orders", {
+      orderId: params.firestoreOrderId,
+      source: params.source,
     });
-  });
+  } else {
+    // Already in orders collection — just update it.
+    await sourceRef.update(paymentFields);
+  }
 }
 
 async function applyFailedUpdate(
   firestoreOrderId: string,
   reason: string
 ): Promise<void> {
-  const orderRef = db.collection("orders").doc(firestoreOrderId);
-  await orderRef.set(
+  // On failure, just update whichever collection holds the doc.
+  // pendingPayments docs stay pending — they'll be cleaned up by the user
+  // cancelling or by a TTL purge. We don't promote them to orders.
+  const pendingRef = db.collection("pendingPayments").doc(firestoreOrderId);
+  const pendingSnap = await pendingRef.get();
+  const ref = pendingSnap.exists
+    ? pendingRef
+    : db.collection("orders").doc(firestoreOrderId);
+
+  await ref.set(
     {
       paymentStatus: "failed",
       paymentVerified: false,
@@ -213,8 +276,10 @@ async function applyRefundUpdate(
 
 /**
  * createRazorpayOrder
- * Input: { orderId: string } — Firebase order doc id only.
+ * Input: { orderId: string } — Firestore pendingPayments (or orders) doc id.
  * Amount is always read/validated from Firestore (never from client).
+ * Placeholder is written to `pendingPayments`, NOT `orders`, so the admin
+ * panel never sees unverified payment orders.
  */
 export const createRazorpayOrder = onCall(
   {
@@ -228,12 +293,9 @@ export const createRazorpayOrder = onCall(
       throw new HttpsError("invalid-argument", "orderId is required.");
     }
 
-    const orderRef = db.collection("orders").doc(orderId);
-    const snap = await orderRef.get();
-    if (!snap.exists) {
-      throw new HttpsError("not-found", "Order not found.");
-    }
-    const order = snap.data() as OrderDoc;
+    // Look in pendingPayments first, then fall back to orders (legacy COD/wallet
+    // orders that somehow end up here, or re-payment attempts).
+    const {ref: orderRef, data: order} = await resolveOrderDoc(orderId);
 
     if (order.customerId && order.customerId !== uid) {
       throw new HttpsError(
@@ -363,12 +425,7 @@ export const verifyRazorpayPayment = onCall(
       throw new HttpsError("invalid-argument", "Missing payment fields.");
     }
 
-    const orderRef = db.collection("orders").doc(firestoreOrderId);
-    const snap = await orderRef.get();
-    if (!snap.exists) {
-      throw new HttpsError("not-found", "Order not found.");
-    }
-    const order = snap.data() as OrderDoc;
+    const {data: order} = await resolveOrderDoc(firestoreOrderId);
 
     if (order.customerId && order.customerId !== uid) {
       throw new HttpsError(
@@ -517,13 +574,23 @@ export const razorpayWebhook = onRequest(
           let firestoreOrderId = String(notes.firestoreOrderId || "");
 
           if (!firestoreOrderId && razorpayOrderId) {
-            const q = await db
-              .collection("orders")
+            // Check pendingPayments first, then orders
+            const pq = await db
+              .collection("pendingPayments")
               .where("razorpayOrderId", "==", razorpayOrderId)
               .limit(1)
               .get();
-            if (!q.empty) {
-              firestoreOrderId = q.docs[0].id;
+            if (!pq.empty) {
+              firestoreOrderId = pq.docs[0].id;
+            } else {
+              const q = await db
+                .collection("orders")
+                .where("razorpayOrderId", "==", razorpayOrderId)
+                .limit(1)
+                .get();
+              if (!q.empty) {
+                firestoreOrderId = q.docs[0].id;
+              }
             }
           }
 
@@ -552,13 +619,16 @@ export const razorpayWebhook = onRequest(
             });
           } else {
             // Event claimed earlier — still ensure order is paid (race with verify).
-            const orderSnap = await db
-              .collection("orders")
+            const pendingSnap2 = await db
+              .collection("pendingPayments")
               .doc(firestoreOrderId)
               .get();
+            const reconcileSnap = pendingSnap2.exists
+              ? pendingSnap2
+              : await db.collection("orders").doc(firestoreOrderId).get();
             if (
-              orderSnap.exists &&
-              orderSnap.data()?.paymentVerified !== true
+              reconcileSnap.exists &&
+              reconcileSnap.data()?.paymentVerified !== true
             ) {
               await applyPaidUpdate({
                 firestoreOrderId,
@@ -578,12 +648,21 @@ export const razorpayWebhook = onRequest(
           let firestoreOrderId = String(notes.firestoreOrderId || "");
           const razorpayOrderId = String(payment?.order_id || "");
           if (!firestoreOrderId && razorpayOrderId) {
-            const q = await db
-              .collection("orders")
+            const pq = await db
+              .collection("pendingPayments")
               .where("razorpayOrderId", "==", razorpayOrderId)
               .limit(1)
               .get();
-            if (!q.empty) firestoreOrderId = q.docs[0].id;
+            if (!pq.empty) {
+              firestoreOrderId = pq.docs[0].id;
+            } else {
+              const q = await db
+                .collection("orders")
+                .where("razorpayOrderId", "==", razorpayOrderId)
+                .limit(1)
+                .get();
+              if (!q.empty) firestoreOrderId = q.docs[0].id;
+            }
           }
           if (firestoreOrderId) {
             await applyFailedUpdate(
@@ -638,6 +717,307 @@ export const razorpayWebhook = onRequest(
         message: err instanceof Error ? err.message : "unknown",
       });
       res.status(500).json({ok: false});
+    }
+  }
+);
+
+/**
+ * sendCustomerNotification
+ *
+ * Triggered whenever a document is created in the `notifications` collection.
+ * The delivery-boy app writes docs here (via OrderService.notifyCustomer) for
+ * events like `order_delayed` and `order_transferred`.  This function reads the
+ * target customer's FCM tokens from `customers/{userId}.fcmTokens[]` and sends
+ * a push notification to every registered device.
+ *
+ * Document shape expected:
+ *   userId      string   — customer uid
+ *   userType    string   — must be 'customer' (guards against admin/partner docs)
+ *   type        string   — e.g. 'order_delayed' | 'order_transferred'
+ *   title       string   — notification title
+ *   message     string   — notification body
+ *   orderId     string   — Firestore order doc id
+ *   orderNumber string   — human-readable order number
+ *   data        object   — extra key-value pairs forwarded as FCM data payload
+ *   read        boolean  — false on creation; updated to true after send
+ */
+export const sendCustomerNotification = onDocumentCreated(
+  {
+    document: "notifications/{notifId}",
+    region: "asia-south1",
+  },
+  async (event) => {
+    const snap = event.data;
+    if (!snap) return;
+
+    const notif = snap.data();
+
+    // Only handle customer-targeted notifications.
+    if (!notif || notif.userType !== "customer") return;
+
+    const userId: string = notif.userId ?? "";
+    const title: string = notif.title ?? "TastyKart";
+    const body: string = notif.message ?? "";
+    const orderId: string = notif.orderId ?? "";
+    const orderNumber: string = notif.orderNumber ?? "";
+    const type: string = notif.type ?? "";
+    const extraData: Record<string, string> = {};
+
+    // Flatten the nested `data` map into string key-value pairs for FCM.
+    const rawData = notif.data as Record<string, unknown> | undefined;
+    if (rawData) {
+      for (const [k, v] of Object.entries(rawData)) {
+        if (v !== undefined && v !== null) {
+          extraData[k] = String(v);
+        }
+      }
+    }
+
+    if (!userId) {
+      logger.warn("sendCustomerNotification: missing userId", {
+        notifId: snap.id,
+      });
+      return;
+    }
+
+    // Fetch FCM tokens from customers/{userId}.fcmTokens[].
+    const customerRef = db.collection("customers").doc(userId);
+    const customerSnap = await customerRef.get();
+    if (!customerSnap.exists) {
+      logger.warn("sendCustomerNotification: customer doc not found", {
+        userId,
+      });
+      return;
+    }
+
+    const customerData = customerSnap.data()!;
+
+    // Respect the notificationsEnabled flag written by the app.
+    // Tokens are no longer deleted on toggle-off; this flag is the gate.
+    const notificationsEnabled = customerData.notificationsEnabled !== false;
+    if (!notificationsEnabled) {
+      logger.info("sendCustomerNotification: notifications disabled for user", {
+        userId,
+      });
+      return;
+    }
+
+    const tokens: string[] = Array.isArray(customerData.fcmTokens)
+      ? (customerData.fcmTokens as string[]).filter(
+          (t) => typeof t === "string" && t.trim().length > 0
+        )
+      : [];
+
+    if (tokens.length === 0) {
+      logger.info("sendCustomerNotification: no FCM tokens for user", {
+        userId,
+      });
+      return;
+    }
+
+    const messaging = getMessaging();
+
+    // Send to all registered tokens in a single MulticastMessage call.
+    const messagePayload = {
+      tokens,
+      notification: {title, body},
+      data: {
+        orderId,
+        orderNumber,
+        type,
+        ...extraData,
+      },
+      android: {
+        notification: {
+          channelId: "tasty_kart_general",
+          priority: "high" as const,
+          sound: "default",
+        },
+        priority: "high" as const,
+      },
+      apns: {
+        payload: {
+          aps: {
+            sound: "default",
+            badge: 1,
+          },
+        },
+      },
+    };
+
+    try {
+      const response = await messaging.sendEachForMulticast(messagePayload);
+      logger.info("sendCustomerNotification: FCM sent", {
+        userId,
+        type,
+        orderId,
+        successCount: response.successCount,
+        failureCount: response.failureCount,
+      });
+
+      // Clean up stale tokens that returned a registration-not-found error.
+      const staleTokens: string[] = [];
+      response.responses.forEach((resp, idx) => {
+        if (
+          !resp.success &&
+          (resp.error?.code ===
+            "messaging/registration-token-not-registered" ||
+            resp.error?.code === "messaging/invalid-registration-token")
+        ) {
+          staleTokens.push(tokens[idx]);
+        }
+      });
+
+      if (staleTokens.length > 0) {
+        await customerRef.update({
+          fcmTokens: FieldValue.arrayRemove(...staleTokens),
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+        logger.info("sendCustomerNotification: removed stale tokens", {
+          userId,
+          count: staleTokens.length,
+        });
+      }
+    } catch (err) {
+      logger.error("sendCustomerNotification: FCM send failed", {
+        userId,
+        orderId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+);
+
+/**
+ * notifyCustomerOnOrderCancelled
+ *
+ * Triggered whenever an order document is updated.  Handles two cases:
+ *
+ * 1. status → 'cancelled'
+ *    Writes a notification doc so `sendCustomerNotification` pushes an FCM
+ *    message telling the user their order was cancelled.
+ *
+ * 2. refundAmount field added (order stays 'cancelled')
+ *    The admin called `refundToWallet()` which increments the customer's
+ *    walletBalance and sets refundAmount on the order without changing status.
+ *    This trigger writes a wallet_refund notification so the user gets an FCM
+ *    push confirming the refund, even with the app in background/terminated.
+ */
+export const notifyCustomerOnOrderCancelled = onDocumentUpdated(
+  {
+    document: "orders/{orderId}",
+    region: "asia-south1",
+  },
+  async (event) => {
+    const before = event.data?.before?.data();
+    const after = event.data?.after?.data();
+    if (!before || !after) return;
+
+    const prevStatus = String(before.status ?? "").toLowerCase().trim();
+    const newStatus = String(after.status ?? "").toLowerCase().trim();
+
+    const orderId = event.params.orderId;
+    const customerId: string = String(after.customerId ?? "").trim();
+    const orderNumber: string = String(
+      after.orderNumber ?? after.id ?? orderId
+    ).trim();
+    const restaurantName: string = String(after.restaurantName ?? "").trim();
+    const displayNum = orderNumber.startsWith("#")
+      ? orderNumber
+      : `#${orderNumber}`;
+
+    if (!customerId) {
+      logger.warn("notifyCustomerOnOrderCancelled: no customerId", {orderId});
+      return;
+    }
+
+    // ── Branch 1: order just became 'cancelled' ────────────────────────────
+    if (newStatus === "cancelled" && prevStatus !== "cancelled") {
+      const cancelledBy: string = String(
+        after.cancelledBy ?? ""
+      ).toLowerCase();
+      const isPartnerCancel = cancelledBy === "delivery_partner";
+
+      const title = "Order Cancelled ❌";
+      const body = isPartnerCancel
+        ? `Your order ${displayNum}${
+            restaurantName ? ` from ${restaurantName}` : ""
+          } was cancelled by the delivery partner. If you were charged, a refund will be processed shortly.`
+        : `Your order ${displayNum}${
+            restaurantName ? ` from ${restaurantName}` : ""
+          } has been cancelled. If you were charged, a refund will be processed shortly.`;
+
+      try {
+        await db.collection("notifications").add({
+          userId: customerId,
+          userType: "customer",
+          type: "order_cancelled",
+          title,
+          message: body,
+          orderId,
+          orderNumber,
+          data: {orderId, orderNumber, action: "view_order"},
+          read: false,
+          priority: "high",
+          createdAt: FieldValue.serverTimestamp(),
+          expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+        });
+        logger.info("notifyCustomerOnOrderCancelled: cancellation notif written", {
+          orderId,
+          customerId,
+          cancelledBy: cancelledBy || "admin",
+        });
+      } catch (err) {
+        logger.error("notifyCustomerOnOrderCancelled: cancellation write failed", {
+          orderId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      return;
+    }
+
+    // ── Branch 2: refundAmount was just added to a cancelled order ──────────
+    // Status stays 'cancelled' — refundToWallet() no longer changes status.
+    // Detect the refund by checking if refundAmount just appeared or increased.
+    const prevRefund = Number(before.refundAmount ?? 0);
+    const newRefund = Number(after.refundAmount ?? 0);
+
+    if (newStatus === "cancelled" && newRefund > 0 && newRefund !== prevRefund) {
+      const title = "💰 Refund credited to your wallet!";
+      const body =
+        `₹${newRefund} has been added to your TastyKart wallet for order ${displayNum}.`;
+
+      try {
+        await db.collection("notifications").add({
+          userId: customerId,
+          userType: "customer",
+          type: "wallet_refund",
+          title,
+          message: body,
+          orderId,
+          orderNumber,
+          data: {
+            orderId,
+            orderNumber,
+            amount: String(newRefund),
+            action: "view_wallet",
+          },
+          read: false,
+          priority: "high",
+          createdAt: FieldValue.serverTimestamp(),
+          expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+        });
+        logger.info("notifyCustomerOnOrderCancelled: refund notif written", {
+          orderId,
+          customerId,
+          refundAmount: newRefund,
+        });
+      } catch (err) {
+        logger.error("notifyCustomerOnOrderCancelled: refund write failed", {
+          orderId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
   }
 );

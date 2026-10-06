@@ -7,7 +7,7 @@ import '../../services/auth_service.dart';
 import '../../utils/responsive.dart';
 import 'components/auth_footer_link.dart';
 import 'components/auth_header.dart';
-import 'components/social_auth_row.dart';
+// import 'components/social_auth_row.dart'; // Google sign-in temporarily disabled
 import 'forgot_password_screen.dart';
 import 'signup_screen.dart';
 
@@ -33,6 +33,7 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   Future<void> _onLogin() async {
+    if (_isLoading) return;
     final isValid = _formKey.currentState?.validate() ?? false;
     if (!isValid) return;
 
@@ -58,22 +59,27 @@ class _LoginScreenState extends State<LoginScreen> {
 
   String _friendlyAuthError(Object e) => AuthService.messageFromError(e);
 
-  Future<void> _onGoogle() async {
-    setState(() => _isLoading = true);
-    try {
-      await AuthService.signInWithGoogle();
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(AuthService.messageFromError(e)),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-    } finally {
-      if (mounted) setState(() => _isLoading = false);
-    }
-  }
+  // Google sign-in temporarily disabled
+  // Future<void> _onGoogle() async {
+  //   if (_isLoading) return;
+  //   setState(() => _isLoading = true);
+  //   try {
+  //     await AuthService.signInWithGoogle();
+  //   } catch (e) {
+  //     if (!mounted) return;
+  //     final msg = AuthService.messageFromError(e);
+  //     ScaffoldMessenger.of(context).showSnackBar(
+  //       SnackBar(
+  //         content: Text(msg),
+  //         behavior: SnackBarBehavior.floating,
+  //         // Give long config-error messages enough time to read.
+  //         duration: Duration(seconds: msg.length > 80 ? 8 : 4),
+  //       ),
+  //     );
+  //   } finally {
+  //     if (mounted) setState(() => _isLoading = false);
+  //   }
+  // }
 
   @override
   Widget build(BuildContext context) {
@@ -139,10 +145,12 @@ class _LoginScreenState extends State<LoginScreen> {
                                   keyboardType: TextInputType.emailAddress,
                                   prefixIcon: Icons.mail_outline_rounded,
                                   validator: (v) {
-                                    if (v == null || v.trim().isEmpty)
+                                    if (v == null || v.trim().isEmpty) {
                                       return 'Email is required';
-                                    if (!v.contains('@'))
+                                    }
+                                    if (!v.contains('@')) {
                                       return 'Enter a valid email';
+                                    }
                                     return null;
                                   },
                                 ),
@@ -157,10 +165,12 @@ class _LoginScreenState extends State<LoginScreen> {
                                   isPassword: true,
                                   prefixIcon: Icons.lock_outline_rounded,
                                   validator: (v) {
-                                    if (v == null || v.isEmpty)
+                                    if (v == null || v.isEmpty) {
                                       return 'Password is required';
-                                    if (v.length < 6)
+                                    }
+                                    if (v.length < 6) {
                                       return 'At least 6 characters';
+                                    }
                                     return null;
                                   },
                                 ),
@@ -238,23 +248,28 @@ class _LoginScreenState extends State<LoginScreen> {
                                 // ── Login button ────────────────────────────────────
                                 AppButton(
                                   label: 'Sign In',
-                                  onPressed: _onLogin,
-                                  isLoading: _isLoading,
+                                  onPressed: _isLoading ? null : _onLogin,
                                 ),
 
                                 SizedBox(height: fieldSpacing * 0.5),
                                 AuthFooterLink(
                                   question: "If you don't have account",
                                   actionLabel: 'Create Account',
-                                  onTap: () => Navigator.of(context).push(
-                                    MaterialPageRoute(
-                                      builder: (_) => const SignupScreen(),
-                                    ),
-                                  ),
+                                  onTap: _isLoading
+                                      ? null
+                                      : () => Navigator.of(context).push(
+                                          MaterialPageRoute(
+                                            builder: (_) =>
+                                                const SignupScreen(),
+                                          ),
+                                        ),
                                 ),
                                 SizedBox(height: fieldSpacing * 0.5),
-                                SocialAuthRow(onGoogleTap: _onGoogle),
 
+                                // Google sign-in temporarily disabled
+                                // SocialAuthRow(
+                                //   onGoogleTap: _isLoading ? null : _onGoogle,
+                                // ),
                                 SizedBox(height: fieldSpacing * 2),
 
                                 // ── Footer link ─────────────────────────────────────

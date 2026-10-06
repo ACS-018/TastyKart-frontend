@@ -5,7 +5,6 @@ import '../../global_widgets/app_text_field.dart';
 import '../../global_widgets/loading_overlay.dart';
 import '../../services/auth_service.dart';
 import '../../utils/responsive.dart';
-import '../auth_gate.dart';
 import 'components/auth_header.dart';
 
 class ResetPasswordScreen extends StatefulWidget {
@@ -40,10 +39,7 @@ class _ResetPasswordScreenState extends State<ResetPasswordScreen> {
           behavior: SnackBarBehavior.floating,
         ),
       );
-      Navigator.of(context).pushAndRemoveUntil(
-        MaterialPageRoute(builder: (_) => const AuthGate()),
-        (_) => false,
-      );
+      Navigator.of(context).popUntil((route) => route.isFirst);
       return;
     }
 
@@ -58,10 +54,7 @@ class _ResetPasswordScreenState extends State<ResetPasswordScreen> {
           behavior: SnackBarBehavior.floating,
         ),
       );
-      Navigator.of(context).pushAndRemoveUntil(
-        MaterialPageRoute(builder: (_) => const AuthGate()),
-        (_) => false,
-      );
+      Navigator.of(context).popUntil((route) => route.isFirst);
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -172,8 +165,7 @@ class _ResetPasswordScreenState extends State<ResetPasswordScreen> {
                                 SizedBox(height: fieldSpacing * 2),
                                 AppButton(
                                   label: 'Update Password',
-                                  onPressed: _onNext,
-                                  isLoading: _isLoading,
+                                  onPressed: _isLoading ? null : _onNext,
                                 ),
                               ],
                             ),

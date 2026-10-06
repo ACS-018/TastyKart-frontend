@@ -35,7 +35,7 @@ class FoodCard extends StatelessWidget {
           borderRadius: BorderRadius.circular(16),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withOpacity(0.06),
+              color: Colors.black.withValues(alpha: 0.06),
               blurRadius: 10,
               offset: const Offset(0, 3),
             ),
@@ -74,7 +74,7 @@ class FoodCard extends StatelessWidget {
                         horizontal: 10,
                         vertical: 5,
                       ),
-                      color: Colors.black.withOpacity(0.55),
+                      color: Colors.black.withValues(alpha: 0.55),
                       child: Text(
                         discount,
                         style: const TextStyle(

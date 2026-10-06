@@ -1,6 +1,11 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/services.dart';
 import 'package:google_sign_in/google_sign_in.dart';
+
+import '../models/customer_account.dart';
+import 'customer_account_service.dart';
+import 'fcm_service.dart';
 import 'firestore_paths.dart';
 
 /// Customer Auth — Firebase Auth + Firestore profile sync.
@@ -10,7 +15,24 @@ class AuthService {
 
   static final FirebaseAuth _auth = FirebaseAuth.instance;
   static final FirebaseFirestore _db = FirebaseFirestore.instance;
-  static final GoogleSignIn _googleSignIn = GoogleSignIn();
+
+  /// Web OAuth client ID (client_type: 3) from google-services.json.
+  /// Required so Google Sign-In returns an idToken for Firebase Auth.
+  /// The Android client (client_type: 1) with the SHA-1 is in google-services.json
+  /// under com.arrowcoders.foodapp — client_id ending in ...flgiunb.
+  ///
+  /// NOTE: serverClientId is NOT passed to GoogleSignIn() constructor.
+  /// google_sign_in_android v6+ auto-reads default_web_client_id from the
+  /// compiled google-services.json resource. Passing it explicitly caused
+  /// a conflict that triggered DEVELOPER_ERROR on some builds.
+
+  static final GoogleSignIn _googleSignIn = GoogleSignIn(
+    scopes: const ['email', 'profile'],
+    // Do NOT set serverClientId here — the plugin reads default_web_client_id
+    // from the compiled google-services.json automatically on Android.
+    // Setting it explicitly conflicts with the auto-resolved value and can
+    // cause DEVELOPER_ERROR (code 10) even when SHA-1 is correctly registered.
+  );
 
   static Stream<User?> get authStateChanges => _auth.authStateChanges();
 
@@ -26,6 +48,8 @@ class AuthService {
       email: email.trim(),
       password: password,
     );
+    // Check Admin block before creating/mirroring customers/{uid}.
+    await _enforceNotBlocked(cred.user);
     await ensureCustomerProfile(cred.user);
     return cred;
   }
@@ -36,27 +60,67 @@ class AuthService {
     required String password,
     String? phone,
   }) async {
+    final trimmedName = name.trim();
+    final normalizedEmail = email.trim().toLowerCase();
+    if (!_isValidEmail(normalizedEmail)) {
+      throw FirebaseAuthException(
+        code: 'invalid-email',
+        message: 'Enter a valid email address',
+      );
+    }
+
     final cred = await _auth.createUserWithEmailAndPassword(
-      email: email.trim(),
+      email: normalizedEmail,
       password: password,
     );
     final user = cred.user;
     if (user != null) {
-      await user.updateDisplayName(name.trim());
-      await user.reload();
-      await _writeCustomerDocs(
-        user: _auth.currentUser ?? user,
-        name: name.trim(),
-        email: email.trim(),
-        phone: phone,
-      );
+      try {
+        await user.updateDisplayName(trimmedName);
+        await user.reload();
+      } catch (_) {}
+      try {
+        await _writeCustomerDocs(
+          user: _auth.currentUser ?? user,
+          name: trimmedName.isNotEmpty
+              ? trimmedName
+              : (normalizedEmail.split('@').first),
+          email: normalizedEmail,
+          phone: phone,
+        );
+      } catch (_) {
+        // Auth account is created; profile sync can retry on next login.
+      }
+      // Block check after profile write (new signup docs start as active).
+      await _enforceNotBlocked(_auth.currentUser ?? user);
     }
     return cred;
   }
 
-  /// Firebase emails a password-reset link (standard Auth flow).
-  static Future<void> sendPasswordResetEmail(String email) {
-    return _auth.sendPasswordResetEmail(email: email.trim());
+  /// Official Firebase Auth password-reset email.
+  ///
+  /// Never stores passwords/tokens in Firestore. For email-enumeration
+  /// protection, unknown emails are treated as success (same UX as known emails).
+  static Future<void> sendPasswordResetEmail(String email) async {
+    final normalized = email.trim().toLowerCase();
+    if (normalized.isEmpty || !_isValidEmail(normalized)) {
+      throw FirebaseAuthException(
+        code: 'invalid-email',
+        message: 'Enter a valid email address',
+      );
+    }
+
+    try {
+      await _auth.sendPasswordResetEmail(email: normalized);
+    } on FirebaseAuthException catch (e) {
+      // Do not reveal whether the email is registered.
+      if (e.code == 'user-not-found') return;
+      rethrow;
+    }
+  }
+
+  static bool _isValidEmail(String email) {
+    return RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$').hasMatch(email);
   }
 
   /// Update password for the currently signed-in user.
@@ -74,24 +138,96 @@ class AuthService {
   // ── Google ───────────────────────────────────────────────────────────────
 
   static Future<UserCredential> signInWithGoogle() async {
-    final googleUser = await _googleSignIn.signIn();
-    if (googleUser == null) {
+    try {
+      // Sign out first so the account picker always appears.
+      // This prevents "sign-in cancelled" when a stale token is silently reused
+      // and then rejected by Firebase because no SHA-1 is registered.
+      try {
+        await _googleSignIn.signOut();
+      } catch (_) {}
+
+      final googleUser = await _googleSignIn.signIn();
+      if (googleUser == null) {
+        // User dismissed the account picker.
+        throw FirebaseAuthException(
+          code: 'aborted-by-user',
+          message: 'Google sign-in was cancelled.',
+        );
+      }
+
+      late GoogleSignInAuthentication googleAuth;
+      try {
+        googleAuth = await googleUser.authentication;
+      } on PlatformException catch (e) {
+        if (e.code == '10' ||
+            (e.message ?? '').contains('DEVELOPER_ERROR') ||
+            (e.message ?? '').contains('10:')) {
+          throw FirebaseAuthException(
+            code: 'google-sign-in-config',
+            message:
+                'Google Sign-In setup error (DEVELOPER_ERROR).\n'
+                'Ensure google-services.json is up to date and '
+                'flutter clean has been run.',
+          );
+        }
+        rethrow;
+      }
+
+      if (googleAuth.idToken == null) {
+        throw FirebaseAuthException(
+          code: 'google-missing-id-token',
+          message:
+              'Google Sign-In did not return an ID token. '
+              'Run flutter clean and try again. If the issue persists, '
+              'verify the SHA-1 is registered in Firebase Console.',
+        );
+      }
+
+      final credential = GoogleAuthProvider.credential(
+        accessToken: googleAuth.accessToken,
+        idToken: googleAuth.idToken,
+      );
+      final cred = await _auth.signInWithCredential(credential);
+      await _enforceNotBlocked(cred.user);
+      await ensureCustomerProfile(
+        cred.user,
+        fallbackName: googleUser.displayName,
+      );
+      return cred;
+    } on FirebaseAuthException {
+      rethrow;
+    } on PlatformException catch (e) {
+      final code = e.code;
+      final msg = e.message ?? '';
+
+      if (code == '10' ||
+          msg.contains('DEVELOPER_ERROR') ||
+          code == 'sign_in_failed') {
+        throw FirebaseAuthException(
+          code: 'google-sign-in-config',
+          message:
+              'Google Sign-In configuration error. '
+              'Run flutter clean and rebuild. '
+              'If the issue persists, verify SHA-1 in Firebase Console.',
+        );
+      }
+
+      // network_error on emulator / no Play Services.
+      if (code == 'network_error' || msg.contains('network_error')) {
+        throw FirebaseAuthException(
+          code: 'network-request-failed',
+          message:
+              'Network error during Google Sign-In. '
+              'Check your internet connection. '
+              'On an emulator, ensure Google Play Services is installed.',
+        );
+      }
+
       throw FirebaseAuthException(
-        code: 'aborted-by-user',
-        message: 'Google sign-in was cancelled.',
+        code: code,
+        message: msg.isNotEmpty ? msg : 'Google sign-in failed.',
       );
     }
-    final googleAuth = await googleUser.authentication;
-    final credential = GoogleAuthProvider.credential(
-      accessToken: googleAuth.accessToken,
-      idToken: googleAuth.idToken,
-    );
-    final cred = await _auth.signInWithCredential(credential);
-    await ensureCustomerProfile(
-      cred.user,
-      fallbackName: googleUser.displayName,
-    );
-    return cred;
   }
 
   // ── Phone OTP (Firebase Phone Auth) ──────────────────────────────────────
@@ -111,6 +247,7 @@ class AuthService {
           onAutoVerified(credential);
         } else {
           await _auth.signInWithCredential(credential);
+          await _enforceNotBlocked(_auth.currentUser);
           await ensureCustomerProfile(_auth.currentUser);
         }
       },
@@ -124,6 +261,7 @@ class AuthService {
     AuthCredential credential,
   ) async {
     final cred = await _auth.signInWithCredential(credential);
+    await _enforceNotBlocked(cred.user);
     await ensureCustomerProfile(cred.user);
     return cred;
   }
@@ -141,11 +279,44 @@ class AuthService {
 
   // ── Session ──────────────────────────────────────────────────────────────
 
+  /// Signs out Firebase Auth (and Google if used). Always clears the Firebase
+  /// session even if Google sign-out fails or hangs.
+  /// Also removes the FCM token from Firestore so logged-out users no longer
+  /// receive push notifications.
   static Future<void> logout() async {
+    // Remove FCM token & set loggedIn:false before signing out so the uid is
+    // still available to build the Firestore document reference.
     try {
-      await _googleSignIn.signOut();
+      await UserFCMService.removeToken();
+    } catch (_) {}
+    try {
+      await _googleSignIn.signOut().timeout(const Duration(seconds: 3));
+    } catch (_) {}
+    try {
+      await _googleSignIn.disconnect().timeout(const Duration(seconds: 2));
     } catch (_) {}
     await _auth.signOut();
+  }
+
+  /// If Admin blocked this customer, sign out and throw.
+  static Future<void> _enforceNotBlocked(User? user) async {
+    if (user == null) return;
+    try {
+      await CustomerAccountService.assertNotBlocked(user);
+    } on CustomerBlockedException {
+      await logout();
+      rethrow;
+    }
+  }
+
+  /// Public re-check for AuthGate / checkout / app resume.
+  static Future<CustomerAccount?> enforceCustomerAccess(User user) async {
+    try {
+      return await CustomerAccountService.assertNotBlocked(user);
+    } on CustomerBlockedException {
+      await logout();
+      rethrow;
+    }
   }
 
   // ── Profile sync (Admin-compatible `users` + `customers`) ────────────────
@@ -158,8 +329,8 @@ class AuthService {
     final name = (user.displayName?.trim().isNotEmpty == true)
         ? user.displayName!.trim()
         : (fallbackName?.trim().isNotEmpty == true
-            ? fallbackName!.trim()
-            : (user.email?.split('@').first ?? 'Customer'));
+              ? fallbackName!.trim()
+              : (user.email?.split('@').first ?? 'Customer'));
     await _writeCustomerDocs(
       user: user,
       name: name,
@@ -185,21 +356,32 @@ class AuthService {
       'createdAt': now,
     }, SetOptions(merge: true));
 
-    // Mirror into Admin `customers` for ops dashboard (same project).
-    await _db.collection(FirestorePaths.customers).doc(user.uid).set({
+    // Mirror into Admin `customers`. Never overwrite Admin block fields.
+    final customerRef = _db.collection(FirestorePaths.customers).doc(user.uid);
+    final existing = await customerRef.get();
+    final payload = <String, dynamic>{
       'id': user.uid,
+      'uid': user.uid,
       'name': name,
-      'email': email,
+      'email': email.trim().toLowerCase(),
       'phone': phone ?? '',
-      'status': 'active',
       'updatedAt': now,
-      'createdAt': now,
-    }, SetOptions(merge: true));
+    };
+    if (!existing.exists) {
+      payload['status'] = 'active';
+      payload['blockedAt'] = null;
+      payload['blockedReason'] = null;
+      payload['createdAt'] = now;
+    }
+    await customerRef.set(payload, SetOptions(merge: true));
   }
 
   // ── Errors ───────────────────────────────────────────────────────────────
 
   static String messageFromError(Object error) {
+    if (error is CustomerBlockedException) {
+      return error.message;
+    }
     if (error is FirebaseAuthException) {
       switch (error.code) {
         case 'invalid-email':
@@ -221,6 +403,15 @@ class AuthService {
           return 'Network error. Check your connection';
         case 'aborted-by-user':
           return 'Sign-in cancelled';
+        case 'operation-not-allowed':
+          return 'This sign-in method is not enabled. Use email instead, or enable it in Firebase Console → Authentication → Sign-in method.';
+        case 'google-sign-in-config':
+        case 'google-missing-id-token':
+          // These errors carry a detailed fix message — show it directly.
+          return error.message ??
+              'Google Sign-In is not configured. '
+                  'Add the app SHA-1 in Firebase Console → Project Settings → '
+                  'Your Apps → "com.arrowcoders.foodapp".';
         case 'requires-recent-login':
           return 'Please sign in again to continue';
         case 'invalid-verification-code':

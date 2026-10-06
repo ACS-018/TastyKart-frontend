@@ -98,7 +98,7 @@ class _SocialButton extends StatelessWidget {
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Image.asset(AppImages.Google, width: iconSize, height: iconSize),
+            Image.asset(AppImages.google, width: iconSize, height: iconSize),
             const SizedBox(width: 6),
             Text(
               label,

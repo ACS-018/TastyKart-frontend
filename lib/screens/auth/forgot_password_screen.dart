@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
 import '../../constants/color_constants.dart';
 import '../../global_widgets/app_button.dart';
 import '../../global_widgets/app_text_field.dart';
@@ -6,9 +8,12 @@ import '../../global_widgets/loading_overlay.dart';
 import '../../services/auth_service.dart';
 import '../../utils/responsive.dart';
 import 'components/auth_header.dart';
-import 'otp_verification_screen.dart';
-import 'reset_password_screen.dart';
 
+/// Forgot password — Firebase email reset link only.
+///
+/// Phone OTP is not used here: Firebase password reset is email-based, and
+/// Phone Auth must be enabled separately for SMS login (not for resetting
+/// email/password accounts).
 class ForgotPasswordScreen extends StatefulWidget {
   const ForgotPasswordScreen({super.key});
 
@@ -19,94 +24,71 @@ class ForgotPasswordScreen extends StatefulWidget {
 class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
   final _formKey = GlobalKey<FormState>();
   final _emailCtrl = TextEditingController();
-  final _phoneCtrl = TextEditingController();
+
   bool _isLoading = false;
-  bool _usePhone = false;
+  bool _submittedOnce = false;
+
+  static final _emailRegex = RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$');
 
   @override
   void dispose() {
     _emailCtrl.dispose();
-    _phoneCtrl.dispose();
     super.dispose();
   }
 
+  void _dismissKeyboard() {
+    FocusScope.of(context).unfocus();
+    SystemChannels.textInput.invokeMethod('TextInput.hide');
+  }
+
   Future<void> _onSendEmailReset() async {
+    if (_isLoading) return;
+
+    setState(() => _submittedOnce = true);
     if (!(_formKey.currentState?.validate() ?? false)) return;
+
+    _dismissKeyboard();
     setState(() => _isLoading = true);
+
     try {
-      await AuthService.sendPasswordResetEmail(_emailCtrl.text.trim());
+      await AuthService.sendPasswordResetEmail(_emailCtrl.text);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Password reset email sent. Check your inbox.'),
-          backgroundColor: AppColors.success,
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(
+            content: Text(
+              'If an account exists for this email, a password reset link has been sent. Check your inbox and spam folder.',
+            ),
+            backgroundColor: AppColors.success,
+            behavior: SnackBarBehavior.floating,
+            duration: Duration(seconds: 5),
+          ),
+        );
       Navigator.of(context).pop();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(AuthService.messageFromError(e)),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(
+            content: Text(AuthService.messageFromError(e)),
+            behavior: SnackBarBehavior.floating,
+            backgroundColor: AppColors.error,
+          ),
+        );
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
   }
 
-  Future<void> _onSendPhoneOtp() async {
-    if (!(_formKey.currentState?.validate() ?? false)) return;
-    setState(() => _isLoading = true);
-    final phone = AuthService.toE164Phone(_phoneCtrl.text.trim());
-
-    await AuthService.verifyPhoneNumber(
-      phoneE164: phone,
-      onCodeSent: (verificationId) {
-        if (!mounted) return;
-        setState(() => _isLoading = false);
-        Navigator.of(context).push(
-          MaterialPageRoute(
-            builder: (_) => OtpVerificationScreen(
-              phone: phone,
-              verificationId: verificationId,
-              purpose: OtpPurpose.resetPassword,
-            ),
-          ),
-        );
-      },
-      onError: (e) {
-        if (!mounted) return;
-        setState(() => _isLoading = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(AuthService.messageFromError(e)),
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-      },
-      onAutoVerified: (credential) async {
-        try {
-          await AuthService.signInWithCredential(credential);
-          if (!mounted) return;
-          setState(() => _isLoading = false);
-          Navigator.of(context).push(
-            MaterialPageRoute(builder: (_) => const ResetPasswordScreen()),
-          );
-        } catch (e) {
-          if (!mounted) return;
-          setState(() => _isLoading = false);
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(AuthService.messageFromError(e)),
-              behavior: SnackBarBehavior.floating,
-            ),
-          );
-        }
-      },
-    );
+  String? _validateEmail(String? value) {
+    final email = value?.trim() ?? '';
+    if (email.isEmpty) return 'Email is required';
+    if (!_emailRegex.hasMatch(email.toLowerCase())) {
+      return 'Enter a valid email address';
+    }
+    return null;
   }
 
   @override
@@ -153,6 +135,9 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
                           constraints: BoxConstraints(maxWidth: maxWidth),
                           child: Form(
                             key: _formKey,
+                            autovalidateMode: _submittedOnce
+                                ? AutovalidateMode.onUserInteraction
+                                : AutovalidateMode.disabled,
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.stretch,
                               children: [
@@ -172,9 +157,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
                                 ),
                                 SizedBox(height: fieldSpacing * 0.5),
                                 Text(
-                                  _usePhone
-                                      ? 'Enter your phone number and we\'ll send\nan OTP via Firebase.'
-                                      : 'Enter your email and we\'ll send a\nFirebase password reset link.',
+                                  'Enter your account email and we\'ll send a\nFirebase password reset link.',
                                   textAlign: TextAlign.center,
                                   style: TextStyle(
                                     fontSize: r.responsive(
@@ -187,67 +170,26 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
                                   ),
                                 ),
                                 SizedBox(height: fieldSpacing * 2),
-                                if (_usePhone)
-                                  AppTextField(
-                                    label: 'Phone Number',
-                                    hint: '10-digit mobile number',
-                                    controller: _phoneCtrl,
-                                    keyboardType: TextInputType.phone,
-                                    prefixIcon: Icons.phone_outlined,
-                                    validator: (v) {
-                                      if (v == null || v.trim().isEmpty) {
-                                        return 'Phone number is required';
-                                      }
-                                      if (v.replaceAll(RegExp(r'\D'), '').length <
-                                          10) {
-                                        return 'Enter a valid phone number';
-                                      }
-                                      return null;
-                                    },
-                                  )
-                                else
-                                  AppTextField(
-                                    label: 'Email',
-                                    hint: 'you@example.com',
-                                    controller: _emailCtrl,
-                                    keyboardType: TextInputType.emailAddress,
-                                    prefixIcon: Icons.mail_outline_rounded,
-                                    validator: (v) {
-                                      if (v == null || v.trim().isEmpty) {
-                                        return 'Email is required';
-                                      }
-                                      if (!v.contains('@')) {
-                                        return 'Enter a valid email';
-                                      }
-                                      return null;
-                                    },
-                                  ),
+                                AppTextField(
+                                  label: 'Email',
+                                  hint: 'you@example.com',
+                                  controller: _emailCtrl,
+                                  keyboardType: TextInputType.emailAddress,
+                                  prefixIcon: Icons.mail_outline_rounded,
+                                  validator: _validateEmail,
+                                ),
                                 SizedBox(height: fieldSpacing * 2),
                                 AppButton(
-                                  label: _usePhone ? 'Send OTP' : 'Send Reset Link',
-                                  onPressed: _usePhone
-                                      ? _onSendPhoneOtp
-                                      : _onSendEmailReset,
-                                  isLoading: _isLoading,
+                                  label: 'Send Reset Link',
+                                  onPressed:
+                                      _isLoading ? null : _onSendEmailReset,
                                 ),
                                 SizedBox(height: fieldSpacing),
-                                TextButton(
-                                  onPressed: () =>
-                                      setState(() => _usePhone = !_usePhone),
-                                  child: Text(
-                                    _usePhone
-                                        ? 'Use email instead'
-                                        : 'Use phone OTP instead',
-                                    style: const TextStyle(
-                                      color: AppColors.primary,
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                  ),
-                                ),
                                 Center(
                                   child: TextButton(
-                                    onPressed: () =>
-                                        Navigator.of(context).pop(),
+                                    onPressed: _isLoading
+                                        ? null
+                                        : () => Navigator.of(context).pop(),
                                     style: TextButton.styleFrom(
                                       foregroundColor: AppColors.primary,
                                     ),

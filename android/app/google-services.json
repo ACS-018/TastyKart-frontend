@@ -14,6 +14,80 @@
       },
       "oauth_client": [
         {
+          "client_id": "1045450942825-jtn77jfjegfd6sj7ova25ith8a20o7cj.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.arrowcoders.fooapp",
+            "certificate_hash": "39f5c81de310adf2f363d92790f83e25d45918ab"
+          }
+        },
+        {
+          "client_id": "1045450942825-m4p8st8036bp47gvst884irvni5799sg.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDeiMUfqmGaBNiAFg5itjlyefmpEnzWWws"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "1045450942825-m4p8st8036bp47gvst884irvni5799sg.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1045450942825:android:f702858743fd97dc66f5f8",
+        "android_client_info": {
+          "package_name": "com.arrowcoders.foodapp"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "1045450942825-e6mkernklulai21hru98g96p1flgiunb.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.arrowcoders.foodapp",
+            "certificate_hash": "39f5c81de310adf2f363d92790f83e25d45918ab"
+          }
+        },
+        {
+          "client_id": "1045450942825-m4p8st8036bp47gvst884irvni5799sg.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDeiMUfqmGaBNiAFg5itjlyefmpEnzWWws"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "1045450942825-m4p8st8036bp47gvst884irvni5799sg.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1045450942825:android:234408ac26f70fe866f5f8",
+        "android_client_info": {
+          "package_name": "com.arrowcoders.fooddeliveryboy"
+        }
+      },
+      "oauth_client": [
+        {
           "client_id": "1045450942825-m4p8st8036bp47gvst884irvni5799sg.apps.googleusercontent.com",
           "client_type": 3
         }
